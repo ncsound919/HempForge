@@ -10,7 +10,7 @@
  * tenantId; we just confirm the signature is intact.
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { Router, RequestHandler } from "express";
+import { Router, RequestHandler, Request, Response } from "express";
 import { param } from "express-validator";
 import { adminDb, signCoa } from "../services/backendServices";
 
@@ -20,7 +20,7 @@ export function verifyRouter(): Router {
   router.get(
     "/verify/:id",
     [param("id").isString().trim().notEmpty().escape()],
-    async (req, res) => {
+    async (req: Request, res: Response) => {
       res.set("Cache-Control", "no-store");
       const { id } = req.params;
 

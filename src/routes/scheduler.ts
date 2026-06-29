@@ -22,7 +22,7 @@ export function schedulerRouter(deps: { authMiddleware: RequestHandler }): Route
 
     try {
       const snap = await adminDb.collection("schedulerJobs").where("tenantId", "==", tenantId).get();
-      const jobs = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      const jobs = snap.docs.map((doc: any) => ({ id: doc.id, ...doc.data() }));
       res.json({ jobs });
     } catch (err: any) {
       console.error("Scheduler jobs fetch error:", err);

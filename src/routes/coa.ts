@@ -6,7 +6,7 @@
  * a different storage path.
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { Router, RequestHandler } from "express";
+import { Router, RequestHandler, Request, Response } from "express";
 import crypto from "crypto";
 import { param } from "express-validator";
 import {
@@ -39,7 +39,7 @@ export function coaRouter(deps: { authMiddleware: RequestHandler }): Router {
     "/:id",
     deps.authMiddleware,
     [param("id").isString().trim().notEmpty().escape()],
-    async (req, res) => {
+    async (req: Request, res: Response) => {
       const tenantId = req.authContext?.tenantId || DEFAULT_TENANT;
       const { id } = req.params;
       try {

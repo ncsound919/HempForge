@@ -56,12 +56,12 @@ async function syncMetrcPackages(config: SchedulerConfig): Promise<void> {
       if (!resp.ok) throw new Error(`Metrc responded ${resp.status}`);
 
       const raw: unknown[] = await resp.json();
-      const normalized = raw.map(normalizeMetrcPackage);
+      const normalized = raw.map((pkg: any) => normalizeMetrcPackage(pkg, tenantId));
 
       if (!config.dryRun) {
         const repo = new TenantRepository<any>('metrcPackages', tenantId);
         for (const pkg of normalized) {
-          await repo.upsert((pkg as any).label, pkg);
+          await repo.save({ id: (pkg as any).packageId, ...pkg });
         }
       }
 
@@ -79,14 +79,16 @@ async function syncMetrcPackages(config: SchedulerConfig): Promise<void> {
 async function computeAllTrendSnapshots(config: SchedulerConfig): Promise<void> {
   for (const tenantId of config.tenantIds) {
     try {
-      const coaRepo = new TenantRepository<any>('coas', tenantId);
-      const coas = await coaRepo.list();
-
-      const snapshot = computeTrendSnapshot(coas);
+      const snapshot = await computeTrendSnapshot(tenantId);
+      if (!snapshot) {
+        structuredLog('warn', 'computeAllTrendSnapshots', `No snapshot computed for ${tenantId}`);
+        continue;
+      }
 
       if (!config.dryRun) {
         const snapshotRepo = new TenantRepository<any>('trendSnapshots', tenantId);
-        await snapshotRepo.upsert(`snapshot_${Date.now()}`, {
+        await snapshotRepo.save({
+          id: `snapshot_${Date.now()}`,
           ...snapshot,
           computedAt: new Date().toISOString(),
         });
@@ -114,7 +116,8 @@ async function verifyAllAuditChains(config: SchedulerConfig): Promise<void> {
 
       if (!result.valid && !config.dryRun) {
         const alertRepo = new TenantRepository<any>('auditAlerts', tenantId);
-        await alertRepo.upsert(`break_${Date.now()}`, {
+        await alertRepo.save({
+          id: `break_${Date.now()}`,
           detectedAt: new Date().toISOString(),
           brokenAt: (result as any).brokenAt,
           severity: 'critical',
@@ -146,7 +149,7 @@ async function sweepComplianceThresholds(config: SchedulerConfig): Promise<void>
           thca: Number(coa.thca) || 0,
           d9thc: Number(coa.d9thc) || 0,
         });
-        if ((result as any).status !== 'compliant' && !coa.flagged) {
+        if ((result as any).status !== 'Compliant' && !coa.flagged) {
           crossed.push({ batchId: coa.batchId, totalThc: (result as any).calculatedTotal, status: (result as any).status });
           if (!config.dryRun) {
             await coaRepo.save({ ...coa, flagged: true });
@@ -156,7 +159,8 @@ async function sweepComplianceThresholds(config: SchedulerConfig): Promise<void>
 
       if (crossed.length > 0 && !config.dryRun) {
         const alertRepo = new TenantRepository<any>('complianceAlerts', tenantId);
-        await alertRepo.upsert(`sweep_${Date.now()}`, {
+        await alertRepo.save({
+          id: `sweep_${Date.now()}`,
           detectedAt: new Date().toISOString(),
           newlyFlagged: crossed,
         });
@@ -181,13 +185,24 @@ async function scoreAllRegulatoryRisk(config: SchedulerConfig): Promise<void> {
       const batches = await batchRepo.list();
 
       const scores = batches.map((b: any) => {
-        const risk = scoreRegulatoryRisk([b]);
-        return { batchId: b.batchId, riskScore: (risk as any).score, riskLevel: (risk as any).level };
+        const compoundName = b.strain || b.compound || 'unknown';
+        const paperLike = {
+          normalizedTitle: b.strain || '',
+          normalizedAbstract: b.notes || b.recommendation || '',
+          compoundTags: b.compounds || [compoundName],
+        };
+        const compoundCount = new Map<string, number>([[compoundName, 1]]);
+        const topCompounds = [{ name: compoundName, count: 1 }];
+        const [risk] = scoreRegulatoryRisk([paperLike], compoundCount, topCompounds);
+        const riskScore = risk?.riskScore ?? 0;
+        const riskLevel = riskScore >= 60 ? 'high' : riskScore >= 30 ? 'medium' : 'low';
+        return { batchId: b.batchId, riskScore, riskLevel };
       });
 
       if (!config.dryRun) {
         const riskRepo = new TenantRepository<any>('riskScores', tenantId);
-        await riskRepo.upsert(`risk_${Date.now()}`, {
+        await riskRepo.save({
+          id: `risk_${Date.now()}`,
           scoredAt: new Date().toISOString(),
           scores,
         });

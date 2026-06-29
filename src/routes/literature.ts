@@ -179,8 +179,8 @@ export function literatureRouter(deps: { authMiddleware: RequestHandler }): Rout
         .limit(20)
         .get();
 
-      const trends = trendsSnap.docs.map((doc) => doc.data());
-      const insights = insightsSnap.docs.map((doc) => doc.data());
+      const trends = trendsSnap.docs.map((doc: any) => doc.data());
+      const insights = insightsSnap.docs.map((doc: any) => doc.data());
 
       res.json({ trends, insights });
     } catch (err: any) {
@@ -206,7 +206,7 @@ export function literatureRouter(deps: { authMiddleware: RequestHandler }): Rout
         .limit(30)
         .get();
 
-      const simulations = snap.docs.map((doc) => doc.data());
+      const simulations = snap.docs.map((doc: any) => doc.data());
       res.json({ simulations });
     } catch (err: any) {
       console.error("Simulations error:", err);
@@ -410,7 +410,7 @@ export function literatureRouter(deps: { authMiddleware: RequestHandler }): Rout
         .orderBy("indexedAt", "desc")
         .limit(100)
         .get();
-      res.json({ documents: snap.docs.map((d) => d.data()) });
+      res.json({ documents: snap.docs.map((d: any) => d.data()) });
     } catch (err: any) {
       console.error("Local-docs error:", err);
       res.status(500).json({ error: "Internal server error" });

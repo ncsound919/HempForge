@@ -23,6 +23,21 @@ export type ComplianceStatus = 'compliant' | 'non_compliant' | 'borderline' | 'u
 export type DispositionRecommendation = 'release' | 'hold' | 'reject' | 'retest';
 export type AlertSeverity = 'none' | 'low' | 'medium' | 'high' | 'critical';
 
+/**
+ * complianceEngine.calculateCompliance() returns status as
+ * 'Compliant' | 'At Risk' | 'Non-Compliant', while this module's
+ * ComplianceStatus uses a different literal set. Map between them so
+ * comparisons against ComplianceStatus values actually match.
+ */
+function toDecisionComplianceStatus(status: string): ComplianceStatus {
+  switch (status) {
+    case 'Compliant': return 'compliant';
+    case 'At Risk': return 'borderline';
+    case 'Non-Compliant': return 'non_compliant';
+    default: return 'unknown';
+  }
+}
+
 export interface BatchReleaseParams {
   thca: number;          // percentage
   d9thc: number;         // percentage
@@ -102,7 +117,7 @@ export function decideBatchRelease(params: BatchReleaseParams): BatchReleaseDeci
   const reasons: string[] = [];
 
   // Compliance
-  const compliance = calculateCompliance(params.thca, params.d9thc);
+  const compliance = calculateCompliance({ thca: params.thca, d9thc: params.d9thc });
   const complianceStatus = compliance.status as ComplianceStatus;
   if (complianceStatus === 'non_compliant') {
     reasons.push(`Non-compliant: D9-THC ${params.d9thc.toFixed(3)}% exceeds 0.3% limit`);

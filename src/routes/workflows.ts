@@ -151,6 +151,22 @@ export function workflowsRouter(deps: { authMiddleware: RequestHandler }): Route
         });
       }
 
+      // ── Resolve the workflow's actual current stage before validating ─────
+      // (BUG FIX: previously fromStage was derived from toStage, so the rule
+      // engine always checked "can stage X transition to itself" instead of
+      // "can the workflow's real current stage transition to X".)
+      let currentStageSlug = "draft";
+      if (adminDb) {
+        const existingDoc = await adminDb.collection("workflows").doc(id).get();
+        if (existingDoc.exists) {
+          const existingData = existingDoc.data();
+          if (existingData?.tenantId && existingData.tenantId !== tenantId) {
+            return res.status(403).json({ error: "Cross-tenant access denied" });
+          }
+          currentStageSlug = STAGE_SLUG[existingData?.currentStage] || "draft";
+        }
+      }
+
       // ── Tier 1: decisionEngine pre-validation ─────────────────────────────
       // Validate permission + business-rule stage constraints deterministically
       // before touching Firestore. Returns immediately with reasons[] if rejected.
@@ -159,7 +175,7 @@ export function workflowsRouter(deps: { authMiddleware: RequestHandler }): Route
         tenantId,
         userId: userContext?.userId || "unknown",
         userRole: userContext?.userRole || "Operator",
-        fromStage: STAGE_SLUG[toStage] || "draft",  // map display name → slug for rule lookup
+        fromStage: currentStageSlug,  // actual current stage, not the requested target
         toStage: STAGE_SLUG[toStage] || toStage,
         requiredPermission: requiredPerm,
       });
