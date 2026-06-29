@@ -1,0 +1,9 @@
+{
+  "coas": {
+    "test-coa-id-456": {
+      "productName": "Robust Fallback Test Product",
+      "batchNumber": "BATCH-Robust-99",
+      "tenantId": "Global-Hemp-Wilson"
+    }
+  }
+}
