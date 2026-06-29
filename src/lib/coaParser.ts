@@ -42,11 +42,11 @@ const STRAIN_PATTERNS = [
 ];
 
 const THCA_PATTERNS = [
-  /thca:\s*([0-9.]+)/i,
-  /thc-a:\s*([0-9.]+)/i,
-  /thca\s*%?\s*[:=]\s*([0-9.]+)/i,
-  /Δ9-thca:\s*([0-9.]+)/i,
-  /total\s+thca:\s*([0-9.]+)/i,
+  /thca:\s{0,10}([0-9.]+)/i,
+  /thc-a:\s{0,10}([0-9.]+)/i,
+  /thca\s{0,5}%?\s{0,5}[:=]\s{0,5}([0-9.]+)/i,
+  /Δ9-thca:\s{0,10}([0-9.]+)/i,
+  /total\s{1,5}thca:\s{0,10}([0-9.]+)/i,
 ];
 
 const D9THC_PATTERNS = [

@@ -291,8 +291,8 @@ describe("7. Compliance Threshold Checker Engine (Module)", () => {
     expect(res.processingIntegrity.thresholds.nonCompliant).toContain("0.3");
   });
 
-  it("should handle exact boundary value 0.3% as Non-Compliant (> not >=)", () => {
-    // 0.3% exactly — determine based on threshold logic (>0.3 is non-compliant)
+  it("should handle exact boundary value 0.3% as At Risk (strictly >0.3 is Non-Compliant)", () => {
+    // 0.3% exactly falls in At Risk band: >=0.25 and <=0.3
     const atExactLimit = calculateCompliance({ totalThc: 0.3 });
     expect(atExactLimit.status).toBe("At Risk"); // >=0.25 and <=0.3
 

@@ -188,8 +188,13 @@ export function verifyAuditChain(entries: AuditEntry[]): ChainVerificationResult
 
     // Verify chain link (except first entry which links to genesis)
     if (i === 0) {
-      if (entry.previousHash !== GENESIS_HASH && i === 0 && entry.sequenceNumber === 1) {
-        // First entry should link to genesis
+      if (entry.previousHash !== GENESIS_HASH) {
+        return {
+          valid: false,
+          totalEntries: sorted.length,
+          verifiedEntries: 0,
+          details: `First entry (seq ${entry.sequenceNumber}) does not link to genesis hash. Expected: ${GENESIS_HASH}, Got: ${entry.previousHash}`,
+        };
       }
     } else {
       const previousEntry = sorted[i - 1];

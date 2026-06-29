@@ -340,6 +340,17 @@ async function startServer() {
   // Audit chain integrity verification endpoint (ALCOA+ criterion 4)
   app.post("/api/audit/verify-chain", authMiddleware, async (req, res) => {
     const userContext = req.authContext;
+    const userId = userContext?.userId || "unknown-user";
+
+    // Rate limit: verification is expensive, limit to prevent abuse
+    const rateLimit = checkGeminiRateLimit(userId);
+    if (!rateLimit.allowed) {
+      return res.status(429).json({
+        error: "Rate limit exceeded for audit verification.",
+        details: `Please try again after ${new Date(rateLimit.resetTime).toLocaleTimeString()}.`
+      });
+    }
+
     if (userContext?.userRole !== "Quality Auditor" && userContext?.userRole !== "Lab Admin") {
       return res.status(403).json({ error: "Forbidden: Quality Auditor or Lab Admin role required for chain verification" });
     }
