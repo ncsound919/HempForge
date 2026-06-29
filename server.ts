@@ -9,6 +9,7 @@ import { requestLogger } from "./src/middleware/requestLogger";
 import { errorHandler, notFoundHandler } from "./src/middleware/errorHandler";
 import { startLiteratureJobs } from "./src/jobs/literatureJobs";
 import { startLocalFolderIndexer } from "./src/jobs/localFolderIndexer";
+import { registerAutonomousJobs } from "./src/jobs/autonomousJobs";
 import { DEFAULT_TENANT } from "./src/config";
 
 import { healthRouter } from "./src/routes/health";
@@ -43,6 +44,18 @@ startLocalFolderIndexer({
   watch: true,
   enabled: true,
   autoPromoteToResearchPapers: true,
+});
+
+// Autonomous deterministic cron jobs — zero LLM dependency.
+// Metrc sync (15 min), trend snapshots (1 hr), audit chain verify (1 hr),
+// compliance sweep (6 hr), risk scoring (24 hr).
+registerAutonomousJobs({
+  tenantIds: [DEFAULT_TENANT],
+  metrcBaseUrl: process.env.METRC_BASE_URL || "https://api.metrc.com",
+  metrcApiKeys: DEFAULT_TENANT
+    ? { [DEFAULT_TENANT]: process.env.METRC_API_KEY || "" }
+    : {},
+  dryRun: !process.env.METRC_API_KEY, // safe no-op when key is not configured
 });
 
 // ─── Server ─────────────────────────────────────────────────────────────────

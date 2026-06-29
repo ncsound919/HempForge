@@ -3,12 +3,19 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * GxP compliance workflow lifecycle. Each batch passes through 5 stages:
  *   Intake → LIMS Verification → Compliance Review → Auditor Sign-off → Metrc Synced
- * Transitions are role-gated per stage.
+ * Transitions are role-gated per stage AND validated by decisionEngine.
+ *
+ * Tier 1 (deterministic) validation runs BEFORE the Firestore transaction:
+ *   - decisionEngine.validateWorkflowTransition() checks role permissions
+ *     and business-rule stage constraints.
+ *   - If validation fails, a 400/403 is returned immediately — no LLM call,
+ *     no Firestore write.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { Router, RequestHandler } from "express";
 import { adminDb, createAuditHash, saveAuditLog } from "../services/backendServices";
 import { hasPermission, requirePermission, Permission } from "../lib/permissionsEngine";
+import { validateWorkflowTransition } from "../lib/decisionEngine";
 import type { AuditLog } from "../lib/firebaseService";
 import { DEFAULT_TENANT } from "../config";
 
@@ -28,6 +35,16 @@ const STAGE_REQUIRED_PERMISSION: Record<WorkflowStage, Permission> = {
   "Compliance Review": "CALCULATE_COMPLIANCE",
   "Auditor Sign-off": "SIGN_COA",
   "Metrc Synced": "SYNC_METRC_PACKAGE",
+};
+
+// Map the GxP stage names to the decisionEngine's stage transition rule keys.
+// decisionEngine uses lowercase slugs; GxP stages use display names.
+const STAGE_SLUG: Record<string, string> = {
+  "Intake": "draft",
+  "LIMS Verification": "pending_review",
+  "Compliance Review": "approved",
+  "Auditor Sign-off": "approved",
+  "Metrc Synced": "released",
 };
 
 export function workflowsRouter(deps: { authMiddleware: RequestHandler }): Router {
@@ -134,7 +151,33 @@ export function workflowsRouter(deps: { authMiddleware: RequestHandler }): Route
         });
       }
 
+      // ── Tier 1: decisionEngine pre-validation ─────────────────────────────
+      // Validate permission + business-rule stage constraints deterministically
+      // before touching Firestore. Returns immediately with reasons[] if rejected.
       const requiredPerm = STAGE_REQUIRED_PERMISSION[toStage as WorkflowStage];
+      const decisionResult = validateWorkflowTransition({
+        tenantId,
+        userId: userContext?.userId || "unknown",
+        userRole: userContext?.userRole || "Operator",
+        fromStage: STAGE_SLUG[toStage] || "draft",  // map display name → slug for rule lookup
+        toStage: STAGE_SLUG[toStage] || toStage,
+        requiredPermission: requiredPerm,
+      });
+
+      if (!decisionResult.permitted) {
+        // Distinguish permission failures (403) from rule/stage failures (400)
+        const isPermissionFailure = decisionResult.reasons.some((r) =>
+          r.includes("does not have permission")
+        );
+        return res.status(isPermissionFailure ? 403 : 400).json({
+          error: "Workflow transition rejected",
+          reasons: decisionResult.reasons,
+          outputClassification: decisionResult.outputClassification,
+        });
+      }
+      // ─────────────────────────────────────────────────────────────────────
+
+      // Legacy per-stage permission check (kept for backward compatibility)
       if (!hasPermission(userContext?.userRole, requiredPerm)) {
         return res.status(403).json({
           error: `Forbidden: Role '${userContext?.userRole}' cannot authorize the '${toStage}' stage. Required permission: ${requiredPerm}.`,
@@ -147,11 +190,12 @@ export function workflowsRouter(deps: { authMiddleware: RequestHandler }): Route
           fallback: true,
           transitionedTo: toStage,
           message: `(Local mode) Simulated transition to stage '${toStage}'.`,
+          outputClassification: decisionResult.outputClassification,
         });
       }
 
       try {
-        await adminDb.runTransaction(async (transaction) => {
+        await adminDb.runTransaction(async (transaction: any) => {
           const docRef = adminDb.collection("workflows").doc(id);
           const doc = await transaction.get(docRef);
 
@@ -188,7 +232,7 @@ export function workflowsRouter(deps: { authMiddleware: RequestHandler }): Route
             userRole: userContext?.userRole || "Operator",
             tenantId,
             action: "WORKFLOW_TRANSITION",
-            details: `Workflow ${id} for batch '${data?.batchId}' advanced from '${data?.currentStage}' to '${toStage}' by ${userContext?.userRole}.`,
+            details: `Workflow ${id} for batch '${data?.batchId}' advanced from '${data?.currentStage}' to '${toStage}' by ${userContext?.userRole}. Validated by decisionEngine (Tier 1).`,
             category: "DATA_CHANGE",
           };
           const hashedAudit = { ...auditEntry, hash: createAuditHash(auditEntry) };
@@ -204,7 +248,11 @@ export function workflowsRouter(deps: { authMiddleware: RequestHandler }): Route
           transaction.set(auditRef, hashedAudit);
         });
 
-        res.json({ success: true, transitionedTo: toStage });
+        res.json({
+          success: true,
+          transitionedTo: toStage,
+          outputClassification: decisionResult.outputClassification,
+        });
       } catch (err: any) {
         console.error("Workflow transition error:", err);
         if (err.message.startsWith("NOT_FOUND:")) return res.status(404).json({ error: err.message.split(":")[1] });

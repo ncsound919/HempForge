@@ -11,24 +11,22 @@
  *   Every 24 hours — scoreAllRegulatoryRisk
  *
  * Requires: node-cron (npm i node-cron @types/node-cron)
- * Usage: import and call registerAutonomousJobs(scheduler) in your server bootstrap.
  */
 
 import cron from 'node-cron';
-import { TenantRepository } from './firebaseRepo';
-import { normalizeMetrcPackage } from './metrcApiClient';
-import { computeTrendSnapshot } from './trendEngine';
-import { verifyAuditChain } from './auditEngine';
-import { calculateCompliance } from './complianceEngine';
-import { scoreRegulatoryRisk } from './trendEngine';
-import { structuredLog } from './structuredLogger';
+import { TenantRepository } from '../lib/firebaseRepo';
+import { normalizeMetrcPackage } from '../lib/metrcApiClient';
+import { computeTrendSnapshot, scoreRegulatoryRisk } from '../lib/trendEngine';
+import { verifyAuditChain } from '../lib/auditEngine';
+import { calculateCompliance } from '../lib/complianceEngine';
+import { structuredLog } from '../lib/structuredLogger';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface SchedulerConfig {
-  /** Firestore collection prefix for tenant data */
+  /** Tenant IDs to run jobs against */
   tenantIds: string[];
   /** Metrc API base URL */
   metrcBaseUrl: string;
@@ -51,7 +49,6 @@ async function syncMetrcPackages(config: SchedulerConfig): Promise<void> {
         continue;
       }
 
-      // Fetch raw packages from Metrc
       const resp = await fetch(
         `${config.metrcBaseUrl}/packages/v2/active?licenseNumber=${tenantId}`,
         { headers: { Authorization: `Basic ${Buffer.from(apiKey + ':').toString('base64')}` } }
@@ -62,9 +59,9 @@ async function syncMetrcPackages(config: SchedulerConfig): Promise<void> {
       const normalized = raw.map(normalizeMetrcPackage);
 
       if (!config.dryRun) {
-        const repo = new TenantRepository('metrcPackages', tenantId);
+        const repo = new TenantRepository<any>('metrcPackages', tenantId);
         for (const pkg of normalized) {
-          await repo.upsert(pkg.label, pkg);
+          await repo.upsert((pkg as any).label, pkg);
         }
       }
 
@@ -82,13 +79,13 @@ async function syncMetrcPackages(config: SchedulerConfig): Promise<void> {
 async function computeAllTrendSnapshots(config: SchedulerConfig): Promise<void> {
   for (const tenantId of config.tenantIds) {
     try {
-      const coaRepo = new TenantRepository<{ thca: number; d9thc: number; testDate: string }>('coas', tenantId);
+      const coaRepo = new TenantRepository<any>('coas', tenantId);
       const coas = await coaRepo.list();
 
       const snapshot = computeTrendSnapshot(coas);
 
       if (!config.dryRun) {
-        const snapshotRepo = new TenantRepository('trendSnapshots', tenantId);
+        const snapshotRepo = new TenantRepository<any>('trendSnapshots', tenantId);
         await snapshotRepo.upsert(`snapshot_${Date.now()}`, {
           ...snapshot,
           computedAt: new Date().toISOString(),
@@ -103,27 +100,26 @@ async function computeAllTrendSnapshots(config: SchedulerConfig): Promise<void> 
 }
 
 // ---------------------------------------------------------------------------
-// Job 3 — Audit Chain Integrity (every hour)
+// Job 3 — Audit Chain Integrity (every hour, offset 5 min)
 // ---------------------------------------------------------------------------
 
 async function verifyAllAuditChains(config: SchedulerConfig): Promise<void> {
   for (const tenantId of config.tenantIds) {
     try {
-      const auditRepo = new TenantRepository<{ id: string; hash: string; previousHash: string; timestamp: number }>('auditLogs', tenantId);
+      const auditRepo = new TenantRepository<any>('auditLogs', tenantId);
       const logs = await auditRepo.list();
-      // Sort ascending by timestamp for correct chain verification
-      logs.sort((a, b) => a.timestamp - b.timestamp);
+      logs.sort((a: any, b: any) => a.timestamp - b.timestamp);
 
       const result = verifyAuditChain(logs);
 
       if (!result.valid && !config.dryRun) {
-        const alertRepo = new TenantRepository('auditAlerts', tenantId);
+        const alertRepo = new TenantRepository<any>('auditAlerts', tenantId);
         await alertRepo.upsert(`break_${Date.now()}`, {
           detectedAt: new Date().toISOString(),
-          brokenAt: result.brokenAt,
+          brokenAt: (result as any).brokenAt,
           severity: 'critical',
         });
-        structuredLog('warn', 'verifyAllAuditChains', `Audit chain BROKEN for ${tenantId} at ${result.brokenAt}`);
+        structuredLog('warn', 'verifyAllAuditChains', `Audit chain BROKEN for ${tenantId}`);
       } else {
         structuredLog('info', 'verifyAllAuditChains', `Audit chain intact for ${tenantId} (${logs.length} entries)`);
       }
@@ -140,23 +136,26 @@ async function verifyAllAuditChains(config: SchedulerConfig): Promise<void> {
 async function sweepComplianceThresholds(config: SchedulerConfig): Promise<void> {
   for (const tenantId of config.tenantIds) {
     try {
-      const coaRepo = new TenantRepository<{ batchId: string; thca: number; d9thc: number; flagged?: boolean }>('coas', tenantId);
+      const coaRepo = new TenantRepository<any>('coas', tenantId);
       const coas = await coaRepo.list();
 
       const crossed: Array<{ batchId: string; totalThc: number; status: string }> = [];
 
       for (const coa of coas) {
-        const result = calculateCompliance(coa.thca, coa.d9thc);
-        if (result.status !== 'compliant' && !coa.flagged) {
-          crossed.push({ batchId: coa.batchId, totalThc: result.totalThc, status: result.status });
+        const result = calculateCompliance({
+          thca: Number(coa.thca) || 0,
+          d9thc: Number(coa.d9thc) || 0,
+        });
+        if ((result as any).status !== 'compliant' && !coa.flagged) {
+          crossed.push({ batchId: coa.batchId, totalThc: (result as any).calculatedTotal, status: (result as any).status });
           if (!config.dryRun) {
-            await coaRepo.upsert(coa.batchId, { ...coa, flagged: true });
+            await coaRepo.save({ ...coa, flagged: true });
           }
         }
       }
 
       if (crossed.length > 0 && !config.dryRun) {
-        const alertRepo = new TenantRepository('complianceAlerts', tenantId);
+        const alertRepo = new TenantRepository<any>('complianceAlerts', tenantId);
         await alertRepo.upsert(`sweep_${Date.now()}`, {
           detectedAt: new Date().toISOString(),
           newlyFlagged: crossed,
@@ -172,22 +171,22 @@ async function sweepComplianceThresholds(config: SchedulerConfig): Promise<void>
 }
 
 // ---------------------------------------------------------------------------
-// Job 5 — Regulatory Risk Scoring (every 24 hours)
+// Job 5 — Regulatory Risk Scoring (every 24 hours at 02:00 ET)
 // ---------------------------------------------------------------------------
 
 async function scoreAllRegulatoryRisk(config: SchedulerConfig): Promise<void> {
   for (const tenantId of config.tenantIds) {
     try {
-      const batchRepo = new TenantRepository<{ batchId: string; thca: number; d9thc: number; testDate: string }>('batches', tenantId);
+      const batchRepo = new TenantRepository<any>('batches', tenantId);
       const batches = await batchRepo.list();
 
-      const scores = batches.map((b) => {
+      const scores = batches.map((b: any) => {
         const risk = scoreRegulatoryRisk([b]);
-        return { batchId: b.batchId, riskScore: risk.score, riskLevel: risk.level };
+        return { batchId: b.batchId, riskScore: (risk as any).score, riskLevel: (risk as any).level };
       });
 
       if (!config.dryRun) {
-        const riskRepo = new TenantRepository('riskScores', tenantId);
+        const riskRepo = new TenantRepository<any>('riskScores', tenantId);
         await riskRepo.upsert(`risk_${Date.now()}`, {
           scoredAt: new Date().toISOString(),
           scores,
@@ -208,14 +207,14 @@ async function scoreAllRegulatoryRisk(config: SchedulerConfig): Promise<void> {
 
 /**
  * Register all 5 autonomous cron jobs.
- * Call once during server bootstrap — typically in server.ts or app.ts.
+ * Call once during server bootstrap in server.ts.
  *
  * Example:
- *   import { registerAutonomousJobs } from './jobs/autonomousJobs';
  *   registerAutonomousJobs({
- *     tenantIds: ['tenant_abc', 'tenant_xyz'],
+ *     tenantIds: [DEFAULT_TENANT],
  *     metrcBaseUrl: process.env.METRC_BASE_URL!,
- *     metrcApiKeys: { tenant_abc: process.env.METRC_KEY_ABC! },
+ *     metrcApiKeys: { [DEFAULT_TENANT]: process.env.METRC_API_KEY! },
+ *     dryRun: !process.env.METRC_API_KEY,
  *   });
  */
 export function registerAutonomousJobs(config: SchedulerConfig): void {
@@ -245,5 +244,5 @@ export function registerAutonomousJobs(config: SchedulerConfig): void {
   }, { name: 'risk-scoring', timezone: 'America/New_York' });
 
   structuredLog('info', 'registerAutonomousJobs',
-    `5 autonomous jobs registered for tenants: [${config.tenantIds.join(', ')}]`);
+    `5 autonomous jobs registered for tenants: [${config.tenantIds.join(', ')}]. dryRun=${config.dryRun ?? false}`);
 }

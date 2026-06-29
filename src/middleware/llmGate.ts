@@ -14,6 +14,9 @@
  *
  * The platform NEVER throws a 500 because a key is missing.
  * It returns a deterministic result and sets `usedTier` in the response.
+ *
+ * Note: isValidGeminiKey mirrors the validation in backendServices.ts
+ * (AIzaSy prefix, length > 10, not the placeholder value).
  */
 
 import type { Request, Response, NextFunction } from 'express';
@@ -43,16 +46,19 @@ declare global {
 
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
 const OLLAMA_HEALTH_TIMEOUT_MS = 1500;
-const GEMINI_KEY_MIN_LENGTH = 20;
 
 // ---------------------------------------------------------------------------
 // Probe functions
 // ---------------------------------------------------------------------------
 
-/** Validates that the Gemini API key looks structurally correct. */
+/**
+ * Validates that the Gemini API key looks structurally correct.
+ * Mirrors the check in src/services/backendServices.ts isValidGeminiKey.
+ */
 export function isValidGeminiKey(key: string | undefined): boolean {
-  if (!key || typeof key !== 'string') return false;
-  return key.trim().length >= GEMINI_KEY_MIN_LENGTH && key.startsWith('AI');
+  if (!key) return false;
+  const cleaned = key.trim();
+  return cleaned.startsWith('AIzaSy') && cleaned.length > 10 && cleaned !== 'MY_GEMINI_API_KEY';
 }
 
 /** Hits the Ollama /api/tags endpoint with a short timeout. */
