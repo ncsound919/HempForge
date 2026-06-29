@@ -22,7 +22,8 @@ export interface ResearchPaper {
 const HEMP_QUERY_TERMS = [
   'cannabidiol hemp', 'THC pharmacokinetics', 'cannabis safety',
   'cannabinoid receptor', 'hemp phytocannabinoid', 'CBD bioavailability',
-  'cannabis toxicology', 'hemp extraction method'
+  'cannabis toxicology', 'hemp extraction method',
+  'hemp terpene profile', 'cannabinoid formulation stability'
 ];
 
 // Helper to handle both arrays and objects gracefully from API responses
@@ -201,29 +202,106 @@ async function fetchEuropePMC(query: string, maxResults = 20): Promise<ResearchP
   }
 }
 
+// ── Semantic Scholar ─────────────────────────────────────────────────────────
+async function fetchSemanticScholar(query: string, maxResults = 20): Promise<ResearchPaper[]> {
+  try {
+    const fields = 'paperId,title,authors,abstract,year,venue,citationCount,isOpenAccess,openAccessPdf,externalIds';
+    const url = `https://api.semanticscholar.org/graph/v1/paper/search` +
+      `?query=${encodeURIComponent(query)}&limit=${maxResults}&fields=${fields}`;
+    
+    const headers: Record<string, string> = { 'Accept': 'application/json' };
+    const s2ApiKey = process.env.SEMANTIC_SCHOLAR_API_KEY;
+    if (s2ApiKey) headers['x-api-key'] = s2ApiKey;
+
+    const res = await fetch(url, { headers });
+    if (res.status === 429) {
+      console.warn("Semantic Scholar rate limited, skipping.");
+      return [];
+    }
+    if (!res.ok) throw new Error(`Semantic Scholar responded with status ${res.status}`);
+    const data = await res.json();
+
+    return (data.data ?? []).map((paper: any): ResearchPaper => ({
+      id: `s2-${paper.paperId}`,
+      title: paper.title ?? 'Untitled Semantic Scholar Paper',
+      authors: ensureArray(paper.authors).map((a: any) => a.name).filter(Boolean),
+      abstract: paper.abstract ?? '',
+      doi: paper.externalIds?.DOI ?? undefined,
+      pmid: paper.externalIds?.PubMed ?? undefined,
+      url: paper.externalIds?.DOI
+        ? `https://doi.org/${paper.externalIds.DOI}`
+        : `https://www.semanticscholar.org/paper/${paper.paperId}`,
+      fullTextUrl: paper.openAccessPdf?.url ?? undefined,
+      source: 'semanticscholar',
+      publishedDate: paper.year ? `${paper.year}` : '',
+      journal: paper.venue ?? '',
+      keywords: [],
+      citationCount: paper.citationCount ?? 0,
+      isOpenAccess: paper.isOpenAccess ?? false,
+      ingestedAt: new Date().toISOString(),
+      tenantId: ''
+    }));
+  } catch (error) {
+    console.error("Error fetching from Semantic Scholar:", error);
+    return [];
+  }
+}
+
+// ── Rate-limited fetcher with exponential backoff ────────────────────────────
+const sourceDelays = new Map<string, number>();
+
+async function rateLimitedFetch<T>(
+  sourceName: string,
+  fetcher: () => Promise<T>,
+  minDelayMs = 200
+): Promise<T> {
+  const lastCall = sourceDelays.get(sourceName) || 0;
+  const elapsed = Date.now() - lastCall;
+  if (elapsed < minDelayMs) {
+    await new Promise(resolve => setTimeout(resolve, minDelayMs - elapsed));
+  }
+  sourceDelays.set(sourceName, Date.now());
+  return fetcher();
+}
+
 // ── Main export: fetch all sources for a query ────────────────────────────
 export async function ingestLiterature(query: string, tenantId: string): Promise<ResearchPaper[]> {
-  const [pubmed, openalex, europepmc] = await Promise.allSettled([
-    fetchPubMed(query),
-    fetchOpenAlex(query),
-    fetchEuropePMC(query)
+  const [pubmed, openalex, europepmc, semanticscholar] = await Promise.allSettled([
+    rateLimitedFetch('pubmed', () => fetchPubMed(query)),
+    rateLimitedFetch('openalex', () => fetchOpenAlex(query)),
+    rateLimitedFetch('europepmc', () => fetchEuropePMC(query)),
+    rateLimitedFetch('semanticscholar', () => fetchSemanticScholar(query)),
   ]);
 
   const all: ResearchPaper[] = [
     ...(pubmed.status === 'fulfilled' ? pubmed.value : []),
     ...(openalex.status === 'fulfilled' ? openalex.value : []),
     ...(europepmc.status === 'fulfilled' ? europepmc.value : []),
+    ...(semanticscholar.status === 'fulfilled' ? semanticscholar.value : []),
   ].map(p => ({ ...p, tenantId }));
 
-  // Deduplicate by DOI, URL hash, or normalized title
-  const seen = new Set<string>();
+  // Multi-key deduplication: check DOI, PMID, normalized title, and URL
+  const doiSeen = new Set<string>();
+  const pmidSeen = new Set<string>();
+  const titleSeen = new Set<string>();
+  const urlSeen = new Set<string>();
+
   const deduped = all.filter(p => {
     const doiNorm = p.doi?.toLowerCase().replace(/^https?:\/\/doi\.org\//, '').trim();
-    const urlHash = p.url ? crypto.createHash('md5').update(p.url).digest('hex').slice(0, 16) : '';
+    const pmidNorm = p.pmid?.trim();
     const titleKey = p.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 80);
-    const key = doiNorm || urlHash || titleKey;
-    if (seen.has(key)) return false;
-    seen.add(key);
+    const urlHash = p.url ? crypto.createHash('md5').update(p.url).digest('hex').slice(0, 16) : '';
+
+    // Check all identity keys independently for cross-source dedup
+    if (doiNorm && doiSeen.has(doiNorm)) return false;
+    if (pmidNorm && pmidSeen.has(pmidNorm)) return false;
+    if (titleKey && titleSeen.has(titleKey)) return false;
+    if (urlHash && urlSeen.has(urlHash)) return false;
+
+    if (doiNorm) doiSeen.add(doiNorm);
+    if (pmidNorm) pmidSeen.add(pmidNorm);
+    if (titleKey) titleSeen.add(titleKey);
+    if (urlHash) urlSeen.add(urlHash);
     return true;
   });
 

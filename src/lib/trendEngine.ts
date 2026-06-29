@@ -106,6 +106,29 @@ export interface PublicationMomentum {
   momentum: "strong" | "moderate" | "weak" | "emerging";
 }
 
+export interface BurstDetection {
+  compound: string;
+  burstStart: string;
+  burstEnd: string;
+  intensity: number;
+  periodCount: number;
+}
+
+export interface CrossSourceValidation {
+  compound: string;
+  sourceCount: number;
+  sources: string[];
+  agreementScore: number;
+  totalMentions: number;
+}
+
+export interface MannKendallResult {
+  tau: number;
+  pValue: number;
+  trend: "significant_increase" | "significant_decrease" | "no_significant_trend";
+  zScore: number;
+}
+
 export interface TrendSnapshot {
   generatedAt: string;
   totalPapers: number;
@@ -124,6 +147,9 @@ export interface TrendSnapshot {
   compoundClusters: CompoundCluster[];
   regulatoryRisk: RegulatoryRiskScore[];
   publicationMomentum: PublicationMomentum;
+  burstDetections: BurstDetection[];
+  crossSourceValidation: CrossSourceValidation[];
+  mannKendallTrends: Record<string, MannKendallResult>;
 }
 
 function stableHash(input: string): string {
@@ -377,6 +403,181 @@ function computePublicationMomentum(velocity: Array<{ period: string; count: num
   };
 }
 
+/**
+ * Mann-Kendall non-parametric trend test for publication time series.
+ * Detects statistically significant monotonic trends in compound mentions over time.
+ */
+function mannKendallTest(values: number[]): MannKendallResult {
+  const n = values.length;
+  if (n < 4) {
+    return { tau: 0, pValue: 1, trend: "no_significant_trend", zScore: 0 };
+  }
+
+  let S = 0;
+  for (let i = 0; i < n - 1; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const diff = values[j] - values[i];
+      if (diff > 0) S++;
+      else if (diff < 0) S--;
+    }
+  }
+
+  const tau = (2 * S) / (n * (n - 1));
+
+  // Variance of S (corrected for ties)
+  const tieGroups = new Map<number, number>();
+  for (const v of values) {
+    tieGroups.set(v, (tieGroups.get(v) || 0) + 1);
+  }
+  let tieCorrection = 0;
+  for (const t of tieGroups.values()) {
+    if (t > 1) tieCorrection += t * (t - 1) * (2 * t + 5);
+  }
+
+  const varS = (n * (n - 1) * (2 * n + 5) - tieCorrection) / 18;
+  const sigmaS = Math.sqrt(varS);
+
+  let zScore = 0;
+  if (sigmaS > 0) {
+    if (S > 0) zScore = (S - 1) / sigmaS;
+    else if (S < 0) zScore = (S + 1) / sigmaS;
+  }
+
+  // Two-tailed p-value approximation using normal distribution
+  const absZ = Math.abs(zScore);
+  const pValue = 2 * (1 - normalCDF(absZ));
+
+  let trend: MannKendallResult["trend"] = "no_significant_trend";
+  if (pValue < 0.05) {
+    trend = tau > 0 ? "significant_increase" : "significant_decrease";
+  }
+
+  return {
+    tau: Math.round(tau * 1000) / 1000,
+    pValue: Math.round(pValue * 10000) / 10000,
+    trend,
+    zScore: Math.round(zScore * 100) / 100,
+  };
+}
+
+/** Standard normal CDF approximation (Abramowitz & Stegun) */
+function normalCDF(x: number): number {
+  const a1 = 0.254829592;
+  const a2 = -0.284496736;
+  const a3 = 1.421413741;
+  const a4 = -1.453152027;
+  const a5 = 1.061405429;
+  const p = 0.3275911;
+  const sign = x < 0 ? -1 : 1;
+  const absX = Math.abs(x);
+  const t = 1.0 / (1.0 + p * absX);
+  const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-absX * absX / 2);
+  return 0.5 * (1.0 + sign * y);
+}
+
+/**
+ * Kleinberg-inspired burst detection for compound mentions across time periods.
+ * Identifies periods of unusually high activity for specific compounds.
+ */
+function detectBursts(
+  compoundPeriodCounts: Map<string, Map<string, number>>,
+  globalPeriodCounts: Map<string, number>
+): BurstDetection[] {
+  const bursts: BurstDetection[] = [];
+
+  for (const [compound, periodMap] of compoundPeriodCounts.entries()) {
+    const periods = [...periodMap.keys()].sort();
+    if (periods.length < 3) continue;
+
+    const counts = periods.map(p => periodMap.get(p) || 0);
+    const mu = ss.mean(counts);
+    const sigma = ss.standardDeviation(counts);
+    if (sigma === 0 || mu === 0) continue;
+
+    // Find contiguous burst periods where count > mu + 1.5*sigma
+    const threshold = mu + 1.5 * sigma;
+    let burstStart: string | null = null;
+    let burstPeriods = 0;
+    let burstIntensity = 0;
+
+    for (let i = 0; i < periods.length; i++) {
+      if (counts[i] > threshold) {
+        if (!burstStart) burstStart = periods[i];
+        burstPeriods++;
+        burstIntensity += (counts[i] - mu) / sigma;
+      } else if (burstStart) {
+        bursts.push({
+          compound,
+          burstStart,
+          burstEnd: periods[i - 1],
+          intensity: Math.round((burstIntensity / burstPeriods) * 100) / 100,
+          periodCount: burstPeriods,
+        });
+        burstStart = null;
+        burstPeriods = 0;
+        burstIntensity = 0;
+      }
+    }
+
+    // Flush trailing burst
+    if (burstStart) {
+      bursts.push({
+        compound,
+        burstStart,
+        burstEnd: periods[periods.length - 1],
+        intensity: Math.round((burstIntensity / burstPeriods) * 100) / 100,
+        periodCount: burstPeriods,
+      });
+    }
+  }
+
+  return bursts
+    .sort((a, b) => b.intensity - a.intensity)
+    .slice(0, 10);
+}
+
+/**
+ * Cross-source validation: measures agreement across different data sources
+ * for compound mentions. Higher scores indicate more reliable signals.
+ */
+function computeCrossSourceValidation(
+  papers: PaperRef[],
+  topCompounds: Array<{ name: string; count: number }>
+): CrossSourceValidation[] {
+  return topCompounds.map(tc => {
+    const sourceMentions = new Map<string, number>();
+    let totalMentions = 0;
+
+    for (const p of papers) {
+      const combined = `${p.normalizedTitle || ""} ${p.normalizedAbstract || ""} ${(p.compoundTags || []).join(" ")}`.toLowerCase();
+      if (combined.includes(tc.name)) {
+        const src = p.source || "unknown";
+        sourceMentions.set(src, (sourceMentions.get(src) || 0) + 1);
+        totalMentions++;
+      }
+    }
+
+    const sources = [...sourceMentions.keys()];
+    const sourceCount = sources.length;
+
+    // Agreement score: how evenly distributed across sources (entropy-based)
+    let agreementScore = 0;
+    if (sourceCount > 1 && totalMentions > 0) {
+      let entropy = 0;
+      for (const count of sourceMentions.values()) {
+        const p = count / totalMentions;
+        if (p > 0) entropy -= p * Math.log2(p);
+      }
+      const maxEntropy = Math.log2(sourceCount);
+      agreementScore = maxEntropy > 0 ? Math.round((entropy / maxEntropy) * 100) : 0;
+    } else if (sourceCount === 1) {
+      agreementScore = 25; // Single source = low validation
+    }
+
+    return { compound: tc.name, sourceCount, sources, agreementScore, totalMentions };
+  }).sort((a, b) => b.agreementScore - a.agreementScore);
+}
+
 export async function computeTrendSnapshot(tenantId: string): Promise<TrendSnapshot | null> {
   if (!adminDb) return null;
 
@@ -407,6 +608,9 @@ export async function computeTrendSnapshot(tenantId: string): Promise<TrendSnaps
         compoundClusters: [],
         regulatoryRisk: [],
         publicationMomentum: { overall: 0, recentWeightedRate: 0, historicalRate: 0, momentum: "weak" },
+        burstDetections: [],
+        crossSourceValidation: [],
+        mannKendallTrends: {},
       };
     }
 
@@ -418,6 +622,7 @@ export async function computeTrendSnapshot(tenantId: string): Promise<TrendSnaps
     const compoundPeriodBuckets = new Map<string, Set<string>>();
     const cooccurrenceCount = new Map<string, number>();
     const compoundPapers = new Map<string, Set<string>>();
+    const compoundPeriodCounts = new Map<string, Map<string, number>>();
 
     for (const p of papers) {
       const cls = p.productionClass || "general";
@@ -454,6 +659,11 @@ export async function computeTrendSnapshot(tenantId: string): Promise<TrendSnaps
         for (const c of compounds) {
           if (!compoundPeriodBuckets.has(monthKey)) compoundPeriodBuckets.set(monthKey, new Set());
           compoundPeriodBuckets.get(monthKey)!.add(c);
+
+          // Track numeric counts per compound per period for burst detection & Mann-Kendall
+          if (!compoundPeriodCounts.has(c)) compoundPeriodCounts.set(c, new Map());
+          const cMap = compoundPeriodCounts.get(c)!;
+          cMap.set(monthKey, (cMap.get(monthKey) || 0) + 1);
         }
       }
 
@@ -618,6 +828,27 @@ export async function computeTrendSnapshot(tenantId: string): Promise<TrendSnaps
     const regulatoryRisk = scoreRegulatoryRisk(papers, compoundCount, topCompounds);
     const publicationMomentum = computePublicationMomentum(publicationVelocity);
 
+    // Advanced trend detection: burst detection across compound time series
+    const globalPeriodCounts = new Map<string, number>();
+    for (const [period, ids] of publicationBuckets.entries()) {
+      globalPeriodCounts.set(period, ids.size);
+    }
+    const burstDetections = detectBursts(compoundPeriodCounts, globalPeriodCounts);
+
+    // Cross-source validation for top compounds
+    const crossSourceValidation = computeCrossSourceValidation(papers, topCompounds);
+
+    // Mann-Kendall statistical trend tests for top compounds
+    const mannKendallTrends: Record<string, MannKendallResult> = {};
+    const sortedPeriods = [...publicationBuckets.keys()].sort();
+    for (const tc of topCompounds.slice(0, 8)) {
+      const periodMap = compoundPeriodCounts.get(tc.name);
+      if (periodMap && sortedPeriods.length >= 4) {
+        const timeSeries = sortedPeriods.map(p => periodMap.get(p) || 0);
+        mannKendallTrends[tc.name] = mannKendallTest(timeSeries);
+      }
+    }
+
     return {
       generatedAt: new Date().toISOString(),
       totalPapers: papers.length,
@@ -636,6 +867,9 @@ export async function computeTrendSnapshot(tenantId: string): Promise<TrendSnaps
       compoundClusters,
       regulatoryRisk,
       publicationMomentum,
+      burstDetections,
+      crossSourceValidation,
+      mannKendallTrends,
     };
   } catch (err) {
     console.error("[trendEngine] Error computing trend snapshot:", err);

@@ -55,7 +55,7 @@ import {
 import { startLiteratureJobs, runLiteratureProduction, runAutonomousTrendsAndSimulations } from "./src/jobs/literatureJobs";
 import { startLocalFolderIndexer, runLocalFolderIndexing } from "./src/jobs/localFolderIndexer";
 
-const DEFAULT_TENANT = DEFAULT_TENANT;
+const DEFAULT_TENANT = "Global-Hemp-Wilson";
 
 // -------------------------------------------------------------
 // Autonomous Research Pipeline (Cron)
@@ -1383,6 +1383,37 @@ Return this EXACTLY as a JSON object matching this schema:
       res.json({ success: true, message: "Deterministic literature production run started." });
     } catch (err: any) {
       console.error("Production/run error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Enhanced Trend Snapshot with Mann-Kendall, burst detection, and cross-source validation
+  app.get("/api/literature/trend-snapshot", authMiddleware, async (req: any, res: any) => {
+    const { tenantId } = req.authContext || {};
+    if (!tenantId) {
+      return res.status(401).json({ error: "Unauthorized: Missing tenant context" });
+    }
+    if (!adminDb) {
+      return res.status(503).json({ error: "Database not initialized" });
+    }
+    try {
+      const dateKey = new Date().toISOString().slice(0, 10);
+      const snapshotId = `snapshot-${tenantId}-${dateKey}`;
+      const snapDoc = await adminDb.collection("trendSnapshots").doc(snapshotId).get();
+
+      if (snapDoc.exists) {
+        return res.json(snapDoc.data());
+      }
+
+      // Compute fresh snapshot if none exists for today
+      const { computeTrendSnapshot } = await import("./src/lib/trendEngine");
+      const snapshot = await computeTrendSnapshot(tenantId);
+      if (!snapshot) {
+        return res.json({ totalPapers: 0, message: "No data available for trend analysis." });
+      }
+      res.json(snapshot);
+    } catch (err: any) {
+      console.error("Trend snapshot error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });
