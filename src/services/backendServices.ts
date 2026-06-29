@@ -8,6 +8,9 @@ import { AuditLog, writeToFirestore, fetchFromFirestore } from "../lib/firebaseS
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
+/** Roles that require MFA in production. */
+const MFA_REQUIRED_ROLES = new Set(["Lab Admin", "Quality Auditor"]);
+
 const configPath = path.join(process.cwd(), "firebase-applet-config.json");
 let firebaseConfig: any = null;
 export let adminDb: any = null;
@@ -305,6 +308,23 @@ export const authMiddleware = async (req: any, res: any, next: any) => {
           "Production users must be provisioned with explicit claims via the Firebase Admin API.",
       });
     }
+
+    // ─── MFA enforcement ────────────────────────────────────────────────────
+    // Lab Admin and Quality Auditor must complete a second factor in production.
+    // Firebase records MFA completion in decoded.firebase.sign_in_second_factor.
+    // Enable MFA in Firebase Console → Authentication → Multi-factor Authentication.
+    if (IS_PRODUCTION && MFA_REQUIRED_ROLES.has(extracted.userRole)) {
+      const secondFactor = (decoded as any)?.firebase?.sign_in_second_factor;
+      if (!secondFactor) {
+        return res.status(403).json({
+          error: "Forbidden",
+          details:
+            `Multi-factor authentication is required for the '${extracted.userRole}' role. ` +
+            "Please sign in again with your second factor (TOTP or SMS) to access this resource.",
+        });
+      }
+    }
+    // ────────────────────────────────────────────────────────────────────────
 
     req.authContext = {
       userId: decoded.uid,
