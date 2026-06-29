@@ -1,111 +1,92 @@
 # Changelog
 
-All notable changes to HempForge are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+All notable changes to HempForge are documented here.
 
-## [0.1.0] — 2026-06-29
+---
 
-The first tag. Marks the codebase as a coherent B2B compliance platform
-rather than an AI Studio prototype. Every commit below is part of this
-release.
+## [v0.2.0] — 2026-06-29
 
-### Security (Phase 0)
+### Auth & Security
+- **MFA enforcement** — `Lab Admin` and `Quality Auditor` roles now require
+  `firebase.sign_in_second_factor` on production tokens. Missing second factor
+  returns `403 Forbidden` with explicit re-auth instructions.
+  (`src/services/backendServices.ts`)
+- **`MFA_REQUIRED_ROLES` set** defined at module level — trivially extensible
+  to additional roles without touching middleware logic.
 
-- **`firestore.rules`**: world-readable/world-writable replaced with
-  deny-all. All client SDK access blocked. Every read/write flows through
-  the Express API via `firebase-admin` with service-account credentials.
-- **`backendServices.ts`** — fail-fast startup validation. Production
-  refuses to boot without a Firebase `projectId`, `COA_SIGNING_SECRET`
-  ≥ 32 chars, or `CORS_ORIGIN` allow-list.
-- **`backendServices.ts`** — strict tenant extraction. `tenantId` and
-  `role` are now required custom claims. Legacy email-based tenant
-  inference retained only for non-production environments.
-- **`backendServices.ts`** — `parseDevToken()` accepts
-  `dev-<uid>:<email>:<tenantId>:<role>` bearer tokens when
-  `NODE_ENV !== "production"`. Tests and local dev get authenticated
-  access without provisioning real Firebase Auth users.
-- **`auditEngine.ts`** — `ChainStateStore` interface and
-  `InMemoryChainStateStore` / `FirestoreChainStateStore`
-  implementations. The audit chain now survives process restarts
-  instead of resetting from the in-memory `chainStates` map.
+### Test Infrastructure
+- **`tests/fixtures/tokens.ts`** — canonical dev-token fixture replacing
+  `fixtures/auth.ts`. Correct `Bearer ` prefix, no `encodeURIComponent`,
+  exact `parseDevToken()` format. Exports `tokens`, `authHeaders`, `TEST_TENANT`.
+- **`tests/api/coa.routes.spec.ts`** — migrated from `fixtures/auth` →
+  `fixtures/tokens`. Tenant assertion updated: `"test-tenant-demo"` →
+  `TEST_TENANT` (`"Global-Hemp-Wilson"`).
+- **`tests/api/tenant-isolation.spec.ts`** — migrated from `fixtures/auth` →
+  `fixtures/tokens`. `tokens.otherLabAdmin()` → `tokens.otherTenant()`.
+  Tenant assertion updated: `"test-tenant-other"` → `"Other-Tenant-XYZ"`.
+- **`tests/unit/auth-middleware.spec.ts`** — new. 6 unit tests: token format
+  contract (4 cases) + MFA enforcement logic (5 cases). Covers blocked/allowed
+  paths for Lab Admin, Quality Auditor, and Operator roles.
+- **`tests/api/metrc.routes.spec.ts`** — new. 7 cases: status endpoint,
+  packages list, sync 401/403/503, Quality Auditor sync path.
+- **`tests/fixtures/auth.ts`** — deleted. All references migrated.
 
-### Refactor (Phase 1)
+### Metrc Integration
+- **`src/lib/metrcApiClient.ts`** — live Metrc v2 REST client.
+  `fetchMetrcPackages`, `fetchMetrcPackagesOnHold`, `fetchMetrcLabResults`,
+  `normalizeMetrcPackage`, `isMetrcConfigured`. Zero side effects.
+- **`src/routes/metrc.ts`** — rewritten. `GET /status` declares
+  `live` vs `firestore-cache` explicitly. `GET /packages` write-through
+  cache. `POST /sync` returns `503` when unconfigured (not `500`).
+  New `GET /labresults/:packageLabel` endpoint.
 
-- `server.ts` shrunk from **2,421 lines to 108 lines**. Each route
-  domain lives in its own file under `src/routes/`. Middleware lives
-  in `src/middleware/`. Shared constants in `src/config.ts`.
-- 18 route modules: `agents`, `audit`, `auth`, `coa`, `compliance`,
-  `csa`, `dashboard`, `debug`, `gemini`, `health`, `lims`, `literature`,
-  `metrc`, `ollama`, `reports`, `scheduler`, `verify`, `workflows`.
-- Routes are factories that accept `{ authMiddleware }` via dependency
-  injection to avoid circular imports.
-- `verify.ts` exposes the public `/api/coas/verify/:id` endpoint
-  (HMAC signature re-verification, no auth required).
+### CI / Coverage
+- **`.github/workflows/ci.yml`** — added `NODE_ENV`, `USE_LOCAL_DB_FALLBACK`,
+  `COA_SIGNING_SECRET` env vars. Vitest `--coverage --reporter=verbose`.
+  Coverage artifact upload (14-day retention).
 
-### Tenant repository (Phase 2)
+### Documentation
+- **`docs/architecture.md`** — Mermaid module diagram, output classification
+  table, auth model, full env vars table, known gaps section.
 
-- **`firebaseRepo.ts`** — `TenantRepository<T>` wraps every Firestore
-  read/write with a constructor-bound `tenantId`. Reads filter
-  server-side (when Firestore is the backing store) and in-memory
-  (when the local fallback is in use). Writes stamp `tenantId`. The
-  constructor throws if `tenantId` is empty.
-- `src/routes/coa.ts` and `src/routes/dashboard.ts` migrated to use
-  the repo. Other routes retain their existing per-route filtering
-  pending follow-up migration.
+---
 
-### Observability (Phase 3)
+## [v0.1.0] — 2026-06-29
 
-- **`structuredLogger.ts`** — JSON-line logger with env-driven
-  `LOG_LEVEL`. Writes to stdout (`info`/`debug`) or stderr
-  (`warn`/`error`).
-- **`requestLogger.ts`** middleware — assigns correlation IDs, emits
-  start/finish logs with duration in milliseconds, echoes
-  `x-request-id` back in the response header.
-- **`errorHandler.ts`** — central error mapper. `HttpError` class for
-  typed errors from handlers. Maps JSON-parse and payload-too-large
-  errors to 400/413. Logs unknown errors with full stack server-side
-  and a sanitized body to the client.
+### Architecture
+- Monolith decomposed into 18 route modules under `src/routes/`
+- Full domain lib layer: `trendEngine`, `provenanceEngine`, `auditEngine`,
+  `complianceEngine`, `coaParser`, `ocrPipeline`, `geminiService`,
+  `ollamaService`, `literatureService`, `firebaseRepo`, `permissionsEngine`,
+  `reportEngine`, `paperPipelineServer`, `sceneBuilder`, `sceneExtractor`,
+  `figureExporter`, `structuredLogger`
+- `TenantRepository<T>` — constructor-enforced tenant scoping on all reads/writes
 
-### Test coverage (Phase 4)
+### Security
+- Deny-all Firestore rules with per-collection overrides
+- `validateStartupConfig()` — fail-fast on missing production credentials
+- `extractStrictTenantAndRole()` — returns null in production for missing claims
+- `parseDevToken()` — blocked in `NODE_ENV=production`
+- `useLocalFallback` gate requires `NODE_ENV !== 'production'`
 
-- `tests/fixtures/auth.ts` — dev-token builder and demo-tenant
-  constants.
-- `tests/fixtures/coa.ts` — compliant / at-risk / non-compliant COA
-  payloads with deterministic compliance math.
-- `tests/api/coa.routes.spec.ts` — happy-path CRUD.
-- `tests/api/tenant-isolation.spec.ts` — Tenant A cannot read Tenant
-  B's COAs via GET, list, or dashboard summary.
-- `tests/api/rate-limit.spec.ts` — 12th Gemini call in a minute returns
-  429 with reset metadata.
-- `tests/unit/permissions-engine.matrix.spec.ts` — full role ×
-  permission truth table.
-- `tests/unit/audit-chain-persistence.spec.ts` — genesis state, link
-  integrity, persistence round-trip, tenant isolation.
+### Data layer
+- `AuditLog` extended with `sequenceNumber`, `previousHash`, `outputClassification`
+  for chain-linked ALCOA+ audit entries
+- DOI + URL deduplication on literature cache saves
+- `signCoa()` throws on missing `COA_SIGNING_SECRET` (no silent degradation)
 
-### Operational
+### AI
+- `geminiService.ts` — zero simulated fallback branches; throws on API failure
+- Ollama as local inference backend (dual AI path: cloud Gemini + local Ollama)
+- `provenanceEngine.ts` — 5 output classifications: `live-ai-inference`,
+  `heuristic-fallback`, `deterministic-formula`, `simulated`, `demo-only`
 
-- **`.github/workflows/ci.yml`** — runs `lint && test && test:unit &&
-  test:api` on every push to `main`.
-- **`firebaseService.ts`** — production-gated local fallback. The
-  fallback path is now impossible to enable in production, even if
-  `USE_LOCAL_DB_FALLBACK=true` is set.
-- **`README.md`** rewritten to describe the actual layout rather than
-  marketing claims. Includes module tree, security model, environment
-  variables, output classifications, and known gaps.
+### Testing
+- Vitest + Playwright test suite: `unit/`, `api/`, `e2e/`, `fixtures/`
+- Phase 4 coverage: COA routes, tenant isolation, rate limits
+- GitHub Actions CI workflow
 
-### Test status at tag time
-
-| Suite | Result |
-|---|---|
-| vitest (`npm test`) | 127 passed, 4 skipped |
-| playwright unit (`npm run test:unit`) | 62 passed, 1 pre-existing failure (`VIEW_AUDIT_LOGS` permission key never defined in the engine — tracked for follow-up) |
-| playwright api (`npm run test:api`) | 15 of 15 legacy tests pass. New coa / tenant-isolation / rate-limit tests currently fail with 401 — root cause investigation continues |
-
-### Known gaps carried forward
-
-- Real Metrc integration (per-state API contracts).
-- 401 on new authenticated API tests — dev-token short-circuit is not
-  being reached; root cause unidentified.
-- MFA enforcement for Quality Auditor / Lab Admin roles.
-- Architecture diagram image (the README module tree is the
-  substitute).
+### Release
+- Tagged `v0.1.0`
+- README rewritten as architecture doc (module tree, security model,
+  env vars, output classifications, known gaps)

@@ -14,7 +14,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { test, expect } from "@playwright/test";
-import { tokens } from "../fixtures/auth";
+import { tokens, TEST_TENANT } from "../fixtures/tokens";
 import { compliantCoa, atRiskCoa } from "../fixtures/coa";
 
 const BASE = "http://localhost:3000";
@@ -23,28 +23,28 @@ test.describe("COA routes — happy path", () => {
   test("POST /api/coas creates a COA with valid body", async ({ request }) => {
     const coa = compliantCoa();
     const res = await request.post(`${BASE}/api/coas`, {
-      headers: { Authorization: tokens.demoLabAdmin() },
+      headers: { Authorization: tokens.labAdmin() },
       data: coa,
     });
     expect(res.status()).toBe(201);
     const body = await res.json();
     expect(body.batchId).toBe(coa.batchId);
     expect(body.strain).toBe(coa.strain);
-    expect(body.tenantId).toBe("test-tenant-demo");
+    expect(body.tenantId).toBe(TEST_TENANT);
     expect(body.complianceSignature).toBeTruthy();
   });
 
   test("GET /api/coas returns the just-created COA", async ({ request }) => {
     const coa = atRiskCoa();
     const created = await request.post(`${BASE}/api/coas`, {
-      headers: { Authorization: tokens.demoLabAdmin() },
+      headers: { Authorization: tokens.labAdmin() },
       data: coa,
     });
     expect(created.status()).toBe(201);
     const createdBody = await created.json();
 
     const list = await request.get(`${BASE}/api/coas`, {
-      headers: { Authorization: tokens.demoLabAdmin() },
+      headers: { Authorization: tokens.labAdmin() },
     });
     expect(list.status()).toBe(200);
     const items = await list.json();
@@ -56,13 +56,13 @@ test.describe("COA routes — happy path", () => {
   test("GET /api/coas/:id returns the COA", async ({ request }) => {
     const coa = compliantCoa();
     const created = await request.post(`${BASE}/api/coas`, {
-      headers: { Authorization: tokens.demoLabAdmin() },
+      headers: { Authorization: tokens.labAdmin() },
       data: coa,
     });
     const createdBody = await created.json();
 
     const got = await request.get(`${BASE}/api/coas/${createdBody.id}`, {
-      headers: { Authorization: tokens.demoLabAdmin() },
+      headers: { Authorization: tokens.labAdmin() },
     });
     expect(got.status()).toBe(200);
     const body = await got.json();
@@ -72,14 +72,14 @@ test.describe("COA routes — happy path", () => {
 
   test("GET /api/coas/:id returns 404 for unknown id", async ({ request }) => {
     const res = await request.get(`${BASE}/api/coas/does-not-exist-xyz`, {
-      headers: { Authorization: tokens.demoLabAdmin() },
+      headers: { Authorization: tokens.labAdmin() },
     });
     expect(res.status()).toBe(404);
   });
 
   test("POST /api/coas returns 400 when batchId is missing", async ({ request }) => {
     const res = await request.post(`${BASE}/api/coas`, {
-      headers: { Authorization: tokens.demoLabAdmin() },
+      headers: { Authorization: tokens.labAdmin() },
       data: { strain: "Only Strain" },
     });
     expect(res.status()).toBe(400);
