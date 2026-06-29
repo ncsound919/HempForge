@@ -55,7 +55,7 @@ import {
 import { startLiteratureJobs, runLiteratureProduction, runAutonomousTrendsAndSimulations } from "./src/jobs/literatureJobs";
 import { startLocalFolderIndexer, runLocalFolderIndexing } from "./src/jobs/localFolderIndexer";
 
-const DEFAULT_TENANT = DEFAULT_TENANT;
+const DEFAULT_TENANT = "Global-Hemp-Wilson";
 
 // -------------------------------------------------------------
 // Autonomous Research Pipeline (Cron)
@@ -1383,6 +1383,44 @@ Return this EXACTLY as a JSON object matching this schema:
       res.json({ success: true, message: "Deterministic literature production run started." });
     } catch (err: any) {
       console.error("Production/run error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Enhanced Trend Snapshot with Mann-Kendall, burst detection, and cross-source validation
+  app.get("/api/literature/trend-snapshot", authMiddleware, async (req: any, res: any) => {
+    const { tenantId, userId } = req.authContext || {};
+    if (!tenantId) {
+      return res.status(401).json({ error: "Unauthorized: Missing tenant context" });
+    }
+    if (!adminDb) {
+      return res.status(503).json({ error: "Database not initialized" });
+    }
+    if (!checkLitRateLimit(userId || "anonymous")) {
+      return res.status(429).json({ error: "Rate limit exceeded for trend snapshot requests." });
+    }
+    try {
+      const dateKey = new Date().toISOString().slice(0, 10);
+      const snapshotId = `snapshot-${tenantId}-${dateKey}`;
+      const snapRef = adminDb.collection("trendSnapshots").doc(snapshotId);
+      const snapDoc = await snapRef.get();
+
+      if (snapDoc.exists) {
+        return res.json(snapDoc.data());
+      }
+
+      // Compute fresh snapshot if none exists for today
+      const { computeTrendSnapshot } = await import("./src/lib/trendEngine");
+      const snapshot = await computeTrendSnapshot(tenantId);
+      if (!snapshot) {
+        return res.status(500).json({ error: "Failed to compute trend snapshot" });
+      }
+
+      const payload = { ...snapshot, id: snapshotId, tenantId };
+      await snapRef.set(payload, { merge: true });
+      return res.json(payload);
+    } catch (err: any) {
+      console.error("Trend snapshot error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });
