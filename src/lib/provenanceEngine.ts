@@ -74,3 +74,24 @@ export function labelDemoData(data: any, source: string) {
     disclaimers: ['DEMO DATA']
   };
 }
+
+/**
+ * classifyOutput — compatibility shim for decisionEngine.ts.
+ * Returns a deterministic string label that decisionEngine attaches to
+ * every response envelope as `outputClassification`.
+ *
+ * @param tier  'deterministic' | 'heuristic' | 'ai' | 'live-ai'
+ * @param source  calling module/function name for traceability
+ */
+export function classifyOutput(
+  tier: 'deterministic' | 'heuristic' | 'ai' | 'live-ai',
+  source: string
+): string {
+  switch (tier) {
+    case 'deterministic': return 'deterministic-formula';
+    case 'heuristic':     return 'heuristic-fallback';
+    case 'ai':            return 'ai-generated-inference';
+    case 'live-ai':       return 'live-ai-inference';
+    default:              return 'deterministic-formula';
+  }
+}

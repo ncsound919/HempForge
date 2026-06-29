@@ -71,7 +71,7 @@ export interface COASummaryParams {
 
 export function buildCOASummaryReport(params: COASummaryParams): ReportDocument {
   const { coa } = params;
-  const compliance = calculateCompliance(coa.thca, coa.d9thc);
+  const compliance = calculateCompliance({ thca: coa.thca, d9thc: coa.d9thc });
   const coaEval = evaluateCOACompliance(coa);
 
   const sections: ReportSection[] = [
@@ -151,12 +151,12 @@ export interface ComplianceAuditParams {
 
 export function buildComplianceAuditReport(params: ComplianceAuditParams): ReportDocument {
   const batchRows = params.batches.map((b) => {
-    const c = calculateCompliance(b.thca, b.d9thc);
+    const c = calculateCompliance({ thca: b.thca, d9thc: b.d9thc });
     return {
       batchId: b.batchId,
       testDate: b.testDate,
-      d9thc: `${b.d9thc.toFixed(3)}%`,
-      totalThc: `${c.totalThc.toFixed(3)}%`,
+      d9thc: `${(b.d9thc ?? 0).toFixed(3)}%`,
+      totalThc: `${(c.calculatedTotal ?? 0).toFixed(3)}%`,
       status: c.status,
       metrcStatus: b.status,
     };

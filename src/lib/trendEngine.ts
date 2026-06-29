@@ -309,7 +309,7 @@ const COMPLIANCE_KEYWORDS = [
   "0.3%", "dry weight", "delta-9", "psychoactive", "controlled substance",
 ];
 
-function scoreRegulatoryRisk(
+export function scoreRegulatoryRisk(
   papers: PaperRef[],
   compoundCount: Map<string, number>,
   topCompounds: Array<{ name: string; count: number }>
