@@ -115,6 +115,9 @@ export function calculateTotalThc(thca: number, d9thc: number): number {
  * Determine compliance status from a calculated Total THC value.
  */
 export function determineComplianceStatus(totalThc: number): ComplianceStatus {
+  if (typeof totalThc !== "number" || Number.isNaN(totalThc) || totalThc < 0) {
+    throw new Error(`Invalid Total THC value: ${totalThc}. Must be a non-negative number.`);
+  }
   if (totalThc > NC_TOTAL_THC_THRESHOLD) return "Non-Compliant";
   if (totalThc >= NC_AT_RISK_THRESHOLD) return "At Risk";
   return "Compliant";
