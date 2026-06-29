@@ -116,6 +116,10 @@ import {
   type AuditEntry as ChainedAuditEntry,
 } from "./src/lib/auditEngine";
 
+function isChainedAuditEntry(log: AuditLog): log is AuditLog & ChainedAuditEntry {
+  return typeof log.sequenceNumber === "number" && typeof log.previousHash === "string";
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -361,13 +365,9 @@ async function startServer() {
       const tenantLogs = logs.filter(log => log.tenantId === tenantId);
 
       // Separate chain-linked entries (have sequenceNumber + previousHash) from legacy entries
-      const chainEntries = tenantLogs.filter(
-        log => typeof log.sequenceNumber === "number" && typeof log.previousHash === "string"
-      ) as unknown as ChainedAuditEntry[];
+      const chainEntries = tenantLogs.filter(isChainedAuditEntry) as unknown as ChainedAuditEntry[];
 
-      const legacyLogs = tenantLogs.filter(
-        log => typeof log.sequenceNumber !== "number" || typeof log.previousHash !== "string"
-      );
+      const legacyLogs = tenantLogs.filter(log => !isChainedAuditEntry(log));
 
       // Verify chain-linked entries using verifyAuditChain (checks hash integrity + chain linking)
       const chainResult = verifyAuditChain(chainEntries);
