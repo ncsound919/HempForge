@@ -836,12 +836,8 @@ export async function computeTrendSnapshot(tenantId: string): Promise<TrendSnaps
     const regulatoryRisk = scoreRegulatoryRisk(papers, compoundCount, topCompounds);
     const publicationMomentum = computePublicationMomentum(publicationVelocity);
 
-    // Advanced trend detection: burst detection across compound time series
-    const globalPeriodCounts = new Map<string, number>();
-    for (const [period, ids] of publicationBuckets.entries()) {
-      globalPeriodCounts.set(period, ids.size);
-    }
-    const burstDetections = detectBursts(compoundPeriodCounts, globalPeriodCounts);
+// Advanced trend detection: burst detection across compound time series
+const burstDetections = detectBursts(compoundPeriodCounts);
 
     // Cross-source validation for top compounds
     const crossSourceValidation = computeCrossSourceValidation(papers, topCompounds);
