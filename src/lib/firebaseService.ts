@@ -249,6 +249,12 @@ export interface AuditLog {
   details: string;
   category: "DATA_CHANGE" | "SYSTEM_INTEGRATION" | "AI_INFERENCE" | "AUTH" | "COMPLIANCE_ALARM";
   hash: string;
+  /** Sequence number for chain-linked audit entries (ALCOA+ criterion 4) */
+  sequenceNumber?: number;
+  /** Hash of the previous chain-linked entry */
+  previousHash?: string;
+  /** Output classification for truthfulness tracking */
+  outputClassification?: string;
 }
 
 export interface MetrcPackage {

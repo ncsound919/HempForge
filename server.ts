@@ -360,8 +360,20 @@ async function startServer() {
       const tenantId = userContext?.tenantId || DEFAULT_TENANT;
       const tenantLogs = logs.filter(log => log.tenantId === tenantId);
 
-      // Verify each log's hash integrity
-      const verificationResults = tenantLogs.map(log => {
+      // Separate chain-linked entries (have sequenceNumber + previousHash) from legacy entries
+      const chainEntries = tenantLogs.filter(
+        log => typeof log.sequenceNumber === "number" && typeof log.previousHash === "string"
+      ) as unknown as ChainedAuditEntry[];
+
+      const legacyLogs = tenantLogs.filter(
+        log => typeof log.sequenceNumber !== "number" || typeof log.previousHash !== "string"
+      );
+
+      // Verify chain-linked entries using verifyAuditChain (checks hash integrity + chain linking)
+      const chainResult = verifyAuditChain(chainEntries);
+
+      // Verify legacy entries using the original hash function
+      const legacyResults = legacyLogs.map(log => {
         const expectedHash = createAuditHash({
           id: log.id,
           timestamp: log.timestamp,
@@ -381,15 +393,18 @@ async function startServer() {
         };
       });
 
-      const corruptedCount = verificationResults.filter(r => !r.hashValid).length;
+      const legacyCorrupted = legacyResults.filter(r => !r.hashValid).length;
 
       res.json({
-        totalEntries: verificationResults.length,
-        verified: verificationResults.length - corruptedCount,
-        corrupted: corruptedCount,
-        chainIntact: corruptedCount === 0,
+        totalEntries: tenantLogs.length,
+        chainEntries: chainResult.totalEntries,
+        chainVerified: chainResult.verifiedEntries,
+        chainIntact: chainResult.valid && legacyCorrupted === 0,
+        chainDetails: chainResult,
+        legacyEntries: legacyLogs.length,
+        legacyVerified: legacyLogs.length - legacyCorrupted,
+        legacyCorrupted,
         verifiedAt: new Date().toISOString(),
-        details: verificationResults,
       });
     } catch (err: any) {
       console.error("Audit chain verification error:", err);
