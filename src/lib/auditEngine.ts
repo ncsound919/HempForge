@@ -78,6 +78,7 @@ export function computeAuditHash(entry: Omit<AuditEntry, "hash">): string {
     entry.details,
     entry.category,
     entry.previousHash,
+    entry.outputClassification ?? "",
   ].join("|");
 
   return crypto.createHash("sha256").update(content).digest("hex");
