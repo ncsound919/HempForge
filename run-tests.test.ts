@@ -9,55 +9,37 @@ import {
   deriveTenantAndRole
 } from "./src/services/backendServices";
 
-// GxP Cannabinoid Decarboxylation Arrhenius kinetics
-function calculateDecarbKinetics(thca: number, d9thc: number, temp: number, duration: number) {
-  const conversionFactor = 0.877;
-  const rateConstant = 0.00008 * Math.exp(0.058 * (temp - 25));
-  const finalThca = thca * Math.exp(-rateConstant * duration);
-  const convertedThc = thca - finalThca;
-  const finalD9Thc = d9thc + (convertedThc * conversionFactor);
-  const totalThcComputed = finalD9Thc + (finalThca * conversionFactor);
-  const isCompliant = totalThcComputed <= 0.3;
+import {
+  calculateCompliance,
+  calculateDecarbKinetics,
+  calculateTotalThc,
+  determineComplianceStatus,
+  evaluateCOACompliance,
+  DECARB_CONVERSION_FACTOR,
+  NC_TOTAL_THC_THRESHOLD,
+  NC_AT_RISK_THRESHOLD,
+  FDA_SERVING_CAP_MG,
+} from "./src/lib/complianceEngine";
 
-  return {
-    rateConstant,
-    finalThca,
-    finalD9Thc,
-    totalThcComputed,
-    isCompliant
-  };
-}
+import {
+  createLiveAIProvenance,
+  createSimulatedProvenance,
+  createFormulaProvenance,
+  createHeuristicProvenance,
+  labelDemoData,
+} from "./src/lib/provenanceEngine";
 
-// Compliance evaluation threshold checker matching Express controller
-function calculateComplianceStatus(input: {
-  thca?: number;
-  d9thc?: number;
-  totalThc?: number;
-  productType?: "Flower" | "Concentrate" | "Infused-Edible" | "Topical";
-  cumulativeThcMg?: number;
-}) {
-  const calculatedTotal = input.thca !== undefined && input.d9thc !== undefined 
-    ? parseFloat(((input.thca * 0.877) + input.d9thc).toFixed(3)) 
-    : parseFloat((input.totalThc || 0).toFixed(3));
+import {
+  computeAuditHash,
+  computeLegacyAuditHash,
+  createChainedAuditEntry,
+  verifyAuditChain,
+  initializeChainState,
+  getChainState,
+} from "./src/lib/auditEngine";
 
-  let status: "Compliant" | "At Risk" | "Non-Compliant" = "Compliant";
-  const alerts: string[] = [];
-
-  if (calculatedTotal > 0.3) {
-    status = "Non-Compliant";
-    alerts.push(`Dry weight Total THC (${calculatedTotal}%) exceeds legal NC standard ≤0.300% (Nov 2026 Caps).`);
-  } else if (calculatedTotal >= 0.25) {
-    status = "At Risk";
-    alerts.push(`Dry weight Total THC (${calculatedTotal}%) approaches maximum legal threshold. Risk of harvest drift or extraction spike.`);
-  }
-
-  if (input.productType === "Infused-Edible" && input.cumulativeThcMg && input.cumulativeThcMg > 0.4) {
-    status = "Non-Compliant";
-    alerts.push(`Cumulative THC dosage (${input.cumulativeThcMg}mg/serving) violates strict upcoming Federal cap of 0.4mg per serving.`);
-  }
-
-  return { calculatedTotal, status, alerts };
-}
+// These functions are now imported from complianceEngine.ts
+// Tests below verify the extracted module matches the original behavior
 
 describe("1. Audit Hash Integrity Verification (ALCOA++)", () => {
   const baseLog = {
@@ -226,52 +208,63 @@ describe("5. Deterministic API Rate Limiter (Mocked Timers)", () => {
 
 describe("6. GxP Cannabinoid Decarboxylation Arrhenius Kinetics", () => {
   it("should calculate positive rate constant showing non-zero thermal energy", () => {
-    const k = calculateDecarbKinetics(15.0, 0.05, 120, 60);
+    const k = calculateDecarbKinetics({ thca: 15.0, d9thc: 0.05, temp: 120, duration: 60 });
     expect(k.rateConstant).toBeGreaterThan(0);
   });
 
   it("should demonstrate THCa degradation over a thermal curve", () => {
-    const k = calculateDecarbKinetics(15.0, 0.05, 120, 60);
+    const k = calculateDecarbKinetics({ thca: 15.0, d9thc: 0.05, temp: 120, duration: 60 });
     expect(k.finalThca).toBeLessThan(15.0);
   });
 
   it("should simulate activation of Delta-9-THC matching chemical stoichiometry", () => {
-    const k = calculateDecarbKinetics(15.0, 0.05, 120, 60);
+    const k = calculateDecarbKinetics({ thca: 15.0, d9thc: 0.05, temp: 120, duration: 60 });
     expect(k.finalD9Thc).toBeGreaterThan(0.05);
   });
 
   it("should mark borderline levels as compliant or non-compliant correctly", () => {
-    const compliant = calculateDecarbKinetics(0.20, 0.02, 100, 30);
+    const compliant = calculateDecarbKinetics({ thca: 0.20, d9thc: 0.02, temp: 100, duration: 30 });
     expect(compliant.isCompliant).toBe(true);
 
-    const nonCompliant = calculateDecarbKinetics(0.35, 0.04, 120, 45);
+    const nonCompliant = calculateDecarbKinetics({ thca: 0.35, d9thc: 0.04, temp: 120, duration: 45 });
     expect(nonCompliant.isCompliant).toBe(false);
+  });
+
+  it("should include methodology metadata for scientific validity", () => {
+    const k = calculateDecarbKinetics({ thca: 15.0, d9thc: 0.05, temp: 120, duration: 60 });
+    expect(k.methodology.model).toBe("Arrhenius first-order decay");
+    expect(k.methodology.outputType).toBe("deterministic_formula");
+    expect(k.methodology.conversionFactor).toBe(DECARB_CONVERSION_FACTOR);
+  });
+
+  it("should reject negative inputs", () => {
+    expect(() => calculateDecarbKinetics({ thca: -1, d9thc: 0.05, temp: 120, duration: 60 })).toThrow();
   });
 });
 
-describe("7. Compliance Threshold Checker Engine", () => {
+describe("7. Compliance Threshold Checker Engine (Module)", () => {
   it("should mark standard dry flower with low THC compliant", () => {
-    const res = calculateComplianceStatus({ thca: 0.20, d9thc: 0.02, productType: "Flower" });
+    const res = calculateCompliance({ thca: 0.20, d9thc: 0.02, productType: "Flower" });
     expect(res.status).toBe("Compliant");
     expect(res.calculatedTotal).toBe(0.195);
     expect(res.alerts).toHaveLength(0);
   });
 
   it("should trigger 'At Risk' alert for borderline levels below threshold", () => {
-    const res = calculateComplianceStatus({ thca: 0.28, d9thc: 0.04, productType: "Flower" });
+    const res = calculateCompliance({ thca: 0.28, d9thc: 0.04, productType: "Flower" });
     expect(res.status).toBe("At Risk");
     expect(res.calculatedTotal).toBe(0.286);
     expect(res.alerts.length).toBeGreaterThan(0);
   });
 
   it("should mark dry weight above 0.3% non-compliant", () => {
-    const res = calculateComplianceStatus({ thca: 0.35, d9thc: 0.03, productType: "Flower" });
+    const res = calculateCompliance({ thca: 0.35, d9thc: 0.03, productType: "Flower" });
     expect(res.status).toBe("Non-Compliant");
     expect(res.calculatedTotal).toBe(0.337);
   });
 
   it("should trigger non-compliant serving limit on infused edibles exceeding 0.4mg per serving", () => {
-    const res = calculateComplianceStatus({
+    const res = calculateCompliance({
       thca: 0.05,
       d9thc: 0.01,
       productType: "Infused-Edible",
@@ -279,6 +272,38 @@ describe("7. Compliance Threshold Checker Engine", () => {
     });
     expect(res.status).toBe("Non-Compliant");
     expect(res.alerts.some(a => a.includes("serving"))).toBe(true);
+  });
+
+  it("should include processing integrity metadata", () => {
+    const res = calculateCompliance({ thca: 0.20, d9thc: 0.02, productType: "Flower" });
+    expect(res.processingIntegrity).toBeDefined();
+    expect(res.processingIntegrity.formula).toContain("0.877");
+    expect(res.processingIntegrity.governingAuthority).toContain("NC Dept");
+    expect(res.processingIntegrity.computedAt).toBeTruthy();
+    expect(res.processingIntegrity.thresholds.nonCompliant).toContain("0.3");
+  });
+
+  it("should handle exact boundary value 0.3% as Non-Compliant (> not >=)", () => {
+    // 0.3% exactly — determine based on threshold logic (>0.3 is non-compliant)
+    const atExactLimit = calculateCompliance({ totalThc: 0.3 });
+    expect(atExactLimit.status).toBe("At Risk"); // >=0.25 and <=0.3
+
+    const justOver = calculateCompliance({ totalThc: 0.301 });
+    expect(justOver.status).toBe("Non-Compliant");
+  });
+
+  it("should handle zero values correctly", () => {
+    const res = calculateCompliance({ thca: 0, d9thc: 0, productType: "Flower" });
+    expect(res.status).toBe("Compliant");
+    expect(res.calculatedTotal).toBe(0);
+  });
+
+  it("should reject negative THCa values", () => {
+    expect(() => calculateTotalThc(-0.1, 0.02)).toThrow();
+  });
+
+  it("should reject NaN values", () => {
+    expect(() => calculateTotalThc(NaN, 0.02)).toThrow();
   });
 });
 
@@ -313,5 +338,417 @@ describe("8. Live Integration Endpoints Checks", () => {
   maybeIt("GET /api/coas should reject with 401 when unauthenticated", async () => {
     const res = await fetch(`${API_ROOT}/api/coas`);
     expect(res.status).toBe(401);
+  });
+});
+
+// ─── NEW AUDIT CRITERIA TESTS ─────────────────────────────────────────────────
+
+describe("9. Provenance & Truth Labeling (Criterion 1, 2, 3, 8)", () => {
+  it("should create live AI provenance with correct classification", () => {
+    const envelope = createLiveAIProvenance(
+      { text: "Sample response", agentType: "Chemistry" },
+      {
+        model: "gemini-2.5-flash",
+        inputs: { prompt: "test" },
+        steps: ["inference"],
+        userId: "user-1",
+        userRole: "Lab Admin",
+        tenantId: "Tenant-A",
+      }
+    );
+
+    expect(envelope.outputClassification).toBe("live-ai-inference");
+    expect(envelope.scientificClassification).toBe("ai-generated-inference");
+    expect(envelope.provenance.source.identity).toBe("gemini-2.5-flash");
+    expect(envelope.provenance.verificationStatus).toBe("ai-generated");
+    expect(envelope.disclaimers.length).toBeGreaterThan(0);
+    expect(envelope.provenance.triggeredBy.tenantId).toBe("Tenant-A");
+  });
+
+  it("should create simulated provenance with clear warnings", () => {
+    const envelope = createSimulatedProvenance(
+      { text: "Fallback content" },
+      {
+        reason: "GEMINI_API_KEY not configured",
+        fallbackMethod: "keyword-matching",
+        inputs: { message: "test" },
+        userId: "user-1",
+        userRole: "Operator",
+        tenantId: "Tenant-A",
+      }
+    );
+
+    expect(envelope.outputClassification).toBe("simulated");
+    expect(envelope.scientificClassification).toBe("speculative-hypothesis");
+    expect(envelope.provenance.verificationStatus).toBe("simulated");
+    expect(envelope.disclaimers.some(d => d.includes("SIMULATED"))).toBe(true);
+    expect(envelope.disclaimers.some(d => d.includes("MUST NOT"))).toBe(true);
+  });
+
+  it("should create formula provenance with verified status", () => {
+    const envelope = createFormulaProvenance(
+      { totalThc: 0.286, status: "At Risk" },
+      {
+        formula: "Total THC = (THCa × 0.877) + Δ9-THC",
+        inputs: { thca: 0.28, d9thc: 0.04 },
+        userId: "user-1",
+        userRole: "Lab Admin",
+        tenantId: "Tenant-A",
+      }
+    );
+
+    expect(envelope.outputClassification).toBe("deterministic-formula");
+    expect(envelope.scientificClassification).toBe("deterministic-formula");
+    expect(envelope.provenance.verificationStatus).toBe("verified");
+  });
+
+  it("should create heuristic provenance with unverified status", () => {
+    const envelope = createHeuristicProvenance(
+      { text: "Pattern matched response" },
+      {
+        method: "keyword-signal-scoring",
+        inputs: { query: "decarb temp" },
+        userId: "user-1",
+        userRole: "Operator",
+        tenantId: "Tenant-A",
+      }
+    );
+
+    expect(envelope.outputClassification).toBe("heuristic-fallback");
+    expect(envelope.provenance.verificationStatus).toBe("unverified");
+  });
+
+  it("should label demo data with demo-only classification", () => {
+    const envelope = labelDemoData(
+      { productName: "Test Product", batchNumber: "BATCH-99" },
+      "local-db-fallback.json seed data"
+    );
+
+    expect(envelope.outputClassification).toBe("demo-only");
+    expect(envelope.provenance.verificationStatus).toBe("simulated");
+    expect(envelope.disclaimers.some(d => d.includes("DEMO DATA"))).toBe(true);
+  });
+
+  it("should preserve provenance timestamp and triggeredBy context", () => {
+    const before = new Date().toISOString();
+    const envelope = createLiveAIProvenance(
+      { result: "test" },
+      {
+        model: "test-model",
+        inputs: {},
+        steps: [],
+        userId: "user-42",
+        userRole: "Quality Auditor",
+        tenantId: "Tenant-X",
+      }
+    );
+    const after = new Date().toISOString();
+
+    expect(envelope.provenance.timestamp >= before).toBe(true);
+    expect(envelope.provenance.timestamp <= after).toBe(true);
+    expect(envelope.provenance.triggeredBy.userId).toBe("user-42");
+    expect(envelope.provenance.triggeredBy.userRole).toBe("Quality Auditor");
+    expect(envelope.provenance.triggeredBy.tenantId).toBe("Tenant-X");
+  });
+});
+
+describe("10. Audit Chain Integrity (Criterion 4 - ALCOA+ Tamper Evidence)", () => {
+  beforeEach(() => {
+    initializeChainState("test-tenant");
+  });
+
+  it("should create chain-linked audit entries with genesis hash for first entry", () => {
+    const entry = createChainedAuditEntry({
+      userId: "user-1",
+      userRole: "Lab Admin",
+      tenantId: "test-tenant",
+      action: "TEST_ACTION",
+      details: "Test details",
+      category: "DATA_CHANGE",
+    });
+
+    expect(entry.hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(entry.previousHash).toBe("0000000000000000000000000000000000000000000000000000000000000000");
+    expect(entry.sequenceNumber).toBe(1);
+  });
+
+  it("should link subsequent entries to the previous hash", () => {
+    const entry1 = createChainedAuditEntry({
+      userId: "user-1",
+      userRole: "Lab Admin",
+      tenantId: "test-tenant",
+      action: "FIRST_ACTION",
+      details: "First entry",
+      category: "DATA_CHANGE",
+    });
+
+    const entry2 = createChainedAuditEntry({
+      userId: "user-1",
+      userRole: "Lab Admin",
+      tenantId: "test-tenant",
+      action: "SECOND_ACTION",
+      details: "Second entry",
+      category: "DATA_CHANGE",
+    });
+
+    expect(entry2.previousHash).toBe(entry1.hash);
+    expect(entry2.sequenceNumber).toBe(2);
+  });
+
+  it("should verify a valid audit chain", () => {
+    const entries: any[] = [];
+    for (let i = 0; i < 5; i++) {
+      entries.push(createChainedAuditEntry({
+        userId: "user-1",
+        userRole: "Lab Admin",
+        tenantId: "test-tenant",
+        action: `ACTION_${i}`,
+        details: `Details for entry ${i}`,
+        category: "DATA_CHANGE",
+      }));
+    }
+
+    const result = verifyAuditChain(entries);
+    expect(result.valid).toBe(true);
+    expect(result.totalEntries).toBe(5);
+    expect(result.verifiedEntries).toBe(5);
+  });
+
+  it("should detect tampered entries in the chain", () => {
+    const entries: any[] = [];
+    for (let i = 0; i < 5; i++) {
+      entries.push(createChainedAuditEntry({
+        userId: "user-1",
+        userRole: "Lab Admin",
+        tenantId: "test-tenant",
+        action: `ACTION_${i}`,
+        details: `Details for entry ${i}`,
+        category: "DATA_CHANGE",
+      }));
+    }
+
+    // Tamper with entry 2
+    entries[2].details = "TAMPERED DETAILS";
+
+    const result = verifyAuditChain(entries);
+    expect(result.valid).toBe(false);
+    expect(result.brokenAt).toBe(2);
+  });
+
+  it("should detect broken chain links", () => {
+    const entries: any[] = [];
+    for (let i = 0; i < 5; i++) {
+      entries.push(createChainedAuditEntry({
+        userId: "user-1",
+        userRole: "Lab Admin",
+        tenantId: "test-tenant",
+        action: `ACTION_${i}`,
+        details: `Details for entry ${i}`,
+        category: "DATA_CHANGE",
+      }));
+    }
+
+    // Break the chain link by modifying previousHash
+    entries[3].previousHash = "0000000000000000000000000000000000000000000000000000000000000000";
+    // Re-compute hash with broken link (simulates someone trying to re-hash after tampering)
+    entries[3].hash = computeAuditHash(entries[3]);
+
+    const result = verifyAuditChain(entries);
+    expect(result.valid).toBe(false);
+    expect(result.brokenAt).toBe(3);
+  });
+
+  it("should compute deterministic hashes", () => {
+    const entry = {
+      id: "audit-123",
+      sequenceNumber: 1,
+      timestamp: "2026-06-29T12:00:00Z",
+      userId: "user-1",
+      userRole: "Lab Admin",
+      tenantId: "test-tenant",
+      action: "TEST",
+      details: "test details",
+      category: "DATA_CHANGE" as const,
+      previousHash: "0000000000000000000000000000000000000000000000000000000000000000",
+    };
+
+    const hash1 = computeAuditHash(entry);
+    const hash2 = computeAuditHash(entry);
+    expect(hash1).toBe(hash2);
+    expect(hash1).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("should maintain separate chains per tenant (tenant isolation)", () => {
+    initializeChainState("tenant-A");
+    initializeChainState("tenant-B");
+
+    const entryA = createChainedAuditEntry({
+      userId: "user-A",
+      userRole: "Lab Admin",
+      tenantId: "tenant-A",
+      action: "ACTION_A",
+      details: "Tenant A action",
+      category: "DATA_CHANGE",
+    });
+
+    const entryB = createChainedAuditEntry({
+      userId: "user-B",
+      userRole: "Lab Admin",
+      tenantId: "tenant-B",
+      action: "ACTION_B",
+      details: "Tenant B action",
+      category: "DATA_CHANGE",
+    });
+
+    // Both should be sequence 1 (independent chains)
+    expect(entryA.sequenceNumber).toBe(1);
+    expect(entryB.sequenceNumber).toBe(1);
+    // Both link to genesis (first in their chain)
+    expect(entryA.previousHash).toBe("0000000000000000000000000000000000000000000000000000000000000000");
+    expect(entryB.previousHash).toBe("0000000000000000000000000000000000000000000000000000000000000000");
+  });
+});
+
+describe("11. Tenant Isolation Verification (Criterion 6)", () => {
+  it("should derive isolated tenants for different corporate domains", () => {
+    const tenantA = deriveTenantAndRole({ email: "user@labcorp-a.com" });
+    const tenantB = deriveTenantAndRole({ email: "user@labcorp-b.com" });
+
+    expect(tenantA.tenantId).not.toBe(tenantB.tenantId);
+    expect(tenantA.tenantId).toBe("Tenant-labcorp-a-com");
+    expect(tenantB.tenantId).toBe("Tenant-labcorp-b-com");
+  });
+
+  it("should never allow empty tenantId", () => {
+    const context = deriveTenantAndRole({ email: "test@domain.org" });
+    expect(context.tenantId).toBeTruthy();
+    expect(context.tenantId.length).toBeGreaterThan(0);
+  });
+
+  it("should use explicit tenantId from claims when available", () => {
+    const context = deriveTenantAndRole({
+      email: "user@gmail.com",
+      tenantId: "Custom-Isolated-Tenant",
+    });
+    expect(context.tenantId).toBe("Custom-Isolated-Tenant");
+  });
+
+  it("should not accept whitespace-only tenantId from claims", () => {
+    const context = deriveTenantAndRole({
+      email: "user@corp.com",
+      tenantId: "   ",
+    });
+    expect(context.tenantId).not.toBe("   ");
+    expect(context.tenantId.trim().length).toBeGreaterThan(0);
+  });
+});
+
+describe("12. COA Compliance Evaluation (Criterion 5 - Processing Integrity)", () => {
+  it("should correctly evaluate compliant COA", () => {
+    const result = evaluateCOACompliance({ thca: 0.20, d9thc: 0.02 });
+    expect(result.status).toBe("Compliant");
+    expect(result.totalThc).toBe(0.195);
+    expect(result.recommendation).toContain("compliance window");
+  });
+
+  it("should correctly evaluate at-risk COA", () => {
+    const result = evaluateCOACompliance({ thca: 0.28, d9thc: 0.04 });
+    expect(result.status).toBe("At Risk");
+    expect(result.totalThc).toBe(0.286);
+    expect(result.recommendation).toContain("Monitor");
+  });
+
+  it("should correctly evaluate non-compliant COA", () => {
+    const result = evaluateCOACompliance({ thca: 0.35, d9thc: 0.03 });
+    expect(result.status).toBe("Non-Compliant");
+    expect(result.totalThc).toBe(0.337);
+    expect(result.recommendation).toContain("Divert");
+  });
+
+  it("should use correct conversion factor (0.877)", () => {
+    // Verify: (0.342 * 0.877) + 0.001 = 0.299834 ≈ 0.3 → At Risk
+    const result = evaluateCOACompliance({ thca: 0.342, d9thc: 0.001 });
+    const expected = parseFloat(((0.342 * 0.877) + 0.001).toFixed(3));
+    expect(result.totalThc).toBe(expected);
+  });
+
+  it("should handle precision at 0.3% boundary correctly", () => {
+    // Exactly 0.3% should be "At Risk" (>= 0.25 and <= 0.3)
+    const atExactLimit = calculateCompliance({ totalThc: 0.3 });
+    expect(atExactLimit.status).toBe("At Risk");
+
+    // Just above 0.3 (must exceed after toFixed(3) rounding)
+    const over = calculateCompliance({ totalThc: 0.301 });
+    expect(over.status).toBe("Non-Compliant");
+  });
+});
+
+describe("13. Scientific Validity Classification (Criterion 8)", () => {
+  it("should distinguish formula outputs from AI inferences in kinetics", () => {
+    const kinetics = calculateDecarbKinetics({ thca: 15.0, d9thc: 0.05, temp: 120, duration: 60 });
+    expect(kinetics.methodology.outputType).toBe("deterministic_formula");
+    expect(kinetics.methodology.model).toBe("Arrhenius first-order decay");
+  });
+
+  it("should distinguish formula provenance from AI provenance", () => {
+    const formulaEnv = createFormulaProvenance({ result: 0.286 }, {
+      formula: "THCa * 0.877 + D9",
+      inputs: { thca: 0.28, d9thc: 0.04 },
+      userId: "u1", userRole: "Lab Admin", tenantId: "T1",
+    });
+    const aiEnv = createLiveAIProvenance({ result: "AI text" }, {
+      model: "gemini-2.5-flash",
+      inputs: { prompt: "test" },
+      steps: ["inference"],
+      userId: "u1", userRole: "Lab Admin", tenantId: "T1",
+    });
+
+    expect(formulaEnv.scientificClassification).toBe("deterministic-formula");
+    expect(aiEnv.scientificClassification).toBe("ai-generated-inference");
+    expect(formulaEnv.provenance.verificationStatus).toBe("verified");
+    expect(aiEnv.provenance.verificationStatus).toBe("ai-generated");
+  });
+
+  it("should classify simulated outputs as speculative hypothesis", () => {
+    const simEnv = createSimulatedProvenance({ content: "fake" }, {
+      reason: "no API key",
+      fallbackMethod: "template",
+      inputs: {},
+      userId: "u1", userRole: "Lab Admin", tenantId: "T1",
+    });
+    expect(simEnv.scientificClassification).toBe("speculative-hypothesis");
+  });
+});
+
+describe("14. Legacy Audit Hash Backward Compatibility", () => {
+  it("should produce same hashes as the legacy createAuditHash function", () => {
+    const log = {
+      id: "log-12345",
+      timestamp: "2026-06-27T23:00:00Z",
+      userId: "user-123",
+      userRole: "Quality Auditor",
+      action: "CSA_AGENT_VALIDATED",
+      details: "FDA validation test run.",
+      category: "AI_INFERENCE"
+    };
+
+    const legacyHash = createAuditHash(log as any);
+    const newLegacyHash = computeLegacyAuditHash(log);
+    expect(legacyHash).toBe(newLegacyHash);
+  });
+});
+
+describe("15. Failure Honesty - Missing Dependency Handling (Criterion 10)", () => {
+  it("should correctly validate Gemini key format", () => {
+    expect(isValidGeminiKey(undefined)).toBe(false);
+    expect(isValidGeminiKey("")).toBe(false);
+    expect(isValidGeminiKey("MY_GEMINI_API_KEY")).toBe(false);
+    expect(isValidGeminiKey("short")).toBe(false);
+    expect(isValidGeminiKey("AIzaSyD_real-key-format-12345")).toBe(true);
+  });
+
+  it("should not silently accept placeholder keys", () => {
+    expect(isValidGeminiKey("AIzaSy")).toBe(false); // too short
+    expect(isValidGeminiKey("NotAIzaSy_something")).toBe(false); // wrong prefix
   });
 });

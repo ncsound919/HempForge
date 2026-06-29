@@ -3,7 +3,13 @@
     "test-coa-id-456": {
       "productName": "Robust Fallback Test Product",
       "batchNumber": "BATCH-Robust-99",
-      "tenantId": "Global-Hemp-Wilson"
+      "tenantId": "Global-Hemp-Wilson",
+      "_metadata": {
+        "outputClassification": "demo-only",
+        "disclaimer": "⚠️ DEMO DATA: This is a local development fallback artifact. It must NOT be used for production compliance decisions.",
+        "source": "local-db-fallback.json (dev/test seed)",
+        "verificationStatus": "simulated"
+      }
     }
   }
 }
