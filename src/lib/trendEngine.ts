@@ -488,8 +488,7 @@ function normalCDF(x: number): number {
  * Identifies periods of unusually high activity for specific compounds.
  */
 function detectBursts(
-  compoundPeriodCounts: Map<string, Map<string, number>>,
-  globalPeriodCounts: Map<string, number>
+  compoundPeriodCounts: Map<string, Map<string, number>>
 ): BurstDetection[] {
   const bursts: BurstDetection[] = [];
 
