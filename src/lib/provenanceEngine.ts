@@ -227,7 +227,7 @@ export function createHeuristicProvenance<T>(
   return {
     data,
     outputClassification: "heuristic-fallback",
-    scientificClassification: "ai-generated-inference",
+    scientificClassification: "speculative-hypothesis",
     provenance: {
       source: { type: "system", identity: "hempforge-heuristic-engine" },
       inputs: opts.inputs,
