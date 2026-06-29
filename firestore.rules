@@ -1,8 +1,19 @@
 rules_version = '2';
+// HempForge security model:
+// All client-side access is denied. Every read and write flows through the
+// Express API (server.ts) using firebase-admin with a service-account
+// credential. The admin SDK bypasses these rules entirely.
+//
+// Public COA verification (/api/coas/verify/:id) is served by the API, not
+// the client SDK, so it is not gated here.
+//
+// This file MUST NOT be relaxed. If a feature appears to need client-side
+// Firestore access, the correct answer is "expose it through the API",
+// not "open the rules".
 service cloud.firestore {
   match /databases/{database}/documents {
     match /{document=**} {
-      allow read, write: if true;
+      allow read, write: if false;
     }
   }
 }

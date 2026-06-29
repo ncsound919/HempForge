@@ -6,6 +6,8 @@ import fs from "fs";
 import crypto from "crypto";
 import { AuditLog, writeToFirestore, fetchFromFirestore } from "../lib/firebaseService";
 
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
 const configPath = path.join(process.cwd(), "firebase-applet-config.json");
 let firebaseConfig: any = null;
 export let adminDb: any = null;
@@ -17,6 +19,50 @@ if (fs.existsSync(configPath)) {
     console.error("Error reading firebase-applet-config.json:", error);
   }
 }
+
+// ─── Startup validation ──────────────────────────────────────────────────────
+// Fail-fast on misconfiguration. Production refuses to boot without
+// (a) a Firebase projectId in firebase-applet-config.json, (b) a sufficiently
+// long COA_SIGNING_SECRET, and (c) an explicit CORS_ORIGIN allow-list.
+// Local/test environments skip the CORS check (Vite dev server origin varies).
+
+function validateStartupConfig(): void {
+  const projectId =
+    firebaseConfig?.projectId || process.env.FIREBASE_PROJECT_ID;
+
+  if (!projectId || !projectId.trim()) {
+    if (IS_PRODUCTION) {
+      throw new Error(
+        "Refusing to start: firebase-applet-config.json is missing projectId. " +
+        "Production requires a configured Firebase project."
+      );
+    }
+    console.warn("[startup] firebase-applet-config.json missing projectId — relying on USE_LOCAL_DB_FALLBACK.");
+  }
+
+  const signingSecret = process.env.COA_SIGNING_SECRET;
+  if (!signingSecret || signingSecret.length < 32) {
+    if (IS_PRODUCTION) {
+      throw new Error(
+        "Refusing to start: COA_SIGNING_SECRET is missing or shorter than 32 characters. " +
+        "Production requires a strong HMAC secret for COA signatures."
+      );
+    }
+    console.warn(
+      `[startup] COA_SIGNING_SECRET is ${signingSecret ? "weak" : "missing"} — COA signing will be disabled. ` +
+      "Generate one with: node -e \"console.log(require('crypto').randomBytes(48).toString('hex'))\""
+    );
+  }
+
+  if (IS_PRODUCTION && !process.env.CORS_ORIGIN) {
+    throw new Error(
+      "Refusing to start: CORS_ORIGIN is not set. Production requires an explicit " +
+      "comma-separated allow-list of origins (e.g. https://app.hempforge.com)."
+    );
+  }
+}
+
+validateStartupConfig();
 
 function getCredential() {
   const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
@@ -130,10 +176,42 @@ export function deriveTenantAndRole(decoded: any): { tenantId: string; userRole:
   return { tenantId, userRole };
 }
 
+/**
+ * Strict extractor for the auth middleware path. Requires tenantId and role
+ * to be present on the verified token claims. Falls back to email inference
+ * only in non-production environments to keep the demo tenant working.
+ *
+ * Returns null if a production request lacks an explicit tenantId claim.
+ */
+function extractStrictTenantAndRole(decoded: any): { tenantId: string; userRole: string } | null {
+  const claimTenant =
+    typeof decoded.tenantId === "string" && decoded.tenantId.trim() ? decoded.tenantId : "";
+  const claimRole =
+    typeof decoded.role === "string" && decoded.role.trim() ? decoded.role : "";
+
+  if (claimTenant && claimRole) {
+    return { tenantId: claimTenant, userRole: claimRole };
+  }
+
+  if (IS_PRODUCTION) {
+    return null;
+  }
+
+  // Non-production: allow the legacy fallback so the demo tenant still works.
+  return deriveTenantAndRole(decoded);
+}
+
 export async function ensureUserProfile(decoded: any): Promise<AuthContext> {
   const userId = decoded.uid;
   const userEmail = decoded.email || "unknown@domain.com";
-  const { tenantId, userRole } = deriveTenantAndRole(decoded);
+  const extracted = extractStrictTenantAndRole(decoded);
+  if (!extracted) {
+    throw new Error(
+      `Token for ${userEmail} is missing required claims (tenantId, role). ` +
+      "Production users must be provisioned with explicit custom claims via the admin API."
+    );
+  }
+  const { tenantId, userRole } = extracted;
 
   await writeToFirestore("users", userId, {
     uid: userId,
@@ -160,6 +238,24 @@ export async function ensureUserProfile(decoded: any): Promise<AuthContext> {
   return { userId, userEmail, tenantId, userRole };
 }
 
+/**
+ * Parse a development-only token of the form:
+ *   dev-<uid>:<email>:<tenantId>:<role>
+ * Tokens MUST start with "dev-" and are only honored when NODE_ENV !== "production".
+ *
+ * Used by tests and local development so engineers do not need a real Firebase
+ * Auth user to exercise protected routes. Production refuses these outright.
+ */
+function parseDevToken(token: string): { uid: string; email: string; tenantId: string; role: string } | null {
+  if (IS_PRODUCTION) return null;
+  if (!token.startsWith("dev-")) return null;
+  const parts = token.slice(4).split(":");
+  if (parts.length < 4) return null;
+  const [uid, email, tenantId, role] = parts;
+  if (!uid || !email || !tenantId || !role) return null;
+  return { uid, email, tenantId, role };
+}
+
 export const authMiddleware = async (req: any, res: any, next: any) => {
   const authHeader = req.headers.authorization;
   const bearerToken =
@@ -176,6 +272,20 @@ export const authMiddleware = async (req: any, res: any, next: any) => {
     });
   }
 
+  // Dev tokens: short-circuit before calling Firebase Auth.
+  // Strictly disabled in production via parseDevToken().
+  const dev = parseDevToken(bearerToken);
+  if (dev) {
+    req.authContext = {
+      userId: dev.uid,
+      userEmail: dev.email,
+      userRole: dev.role,
+      tenantId: dev.tenantId,
+    };
+    req.decodedClaims = dev;
+    return next();
+  }
+
   try {
     const decoded = await getAdminAuth().verifyIdToken(bearerToken);
 
@@ -186,13 +296,21 @@ export const authMiddleware = async (req: any, res: any, next: any) => {
       });
     }
 
-    const { tenantId, userRole } = deriveTenantAndRole(decoded);
+    const extracted = extractStrictTenantAndRole(decoded);
+    if (!extracted) {
+      return res.status(403).json({
+        error: "Forbidden",
+        details:
+          "Token is missing required custom claims (tenantId, role). " +
+          "Production users must be provisioned with explicit claims via the Firebase Admin API.",
+      });
+    }
 
     req.authContext = {
       userId: decoded.uid,
       userEmail: decoded.email || "unknown@domain.com",
-      userRole,
-      tenantId,
+      userRole: extracted.userRole,
+      tenantId: extracted.tenantId,
     };
     req.decodedClaims = decoded;
 
