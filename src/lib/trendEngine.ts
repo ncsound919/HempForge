@@ -551,14 +551,19 @@ function computeCrossSourceValidation(
   papers: PaperRef[],
   topCompounds: Array<{ name: string; count: number }>
 ): CrossSourceValidation[] {
-  return topCompounds.map(tc => {
-    const sourceMentions = new Map<string, number>();
-    let totalMentions = 0;
+return topCompounds.map(tc => {
+  const sourceMentions = new Map<string, number>();
+  let totalMentions = 0;
+  const needle = tc.name.toLowerCase();
 
-    for (const p of papers) {
-      const combined = `${p.normalizedTitle || ""} ${p.normalizedAbstract || ""} ${(p.compoundTags || []).join(" ")}`.toLowerCase();
-      if (combined.includes(tc.name)) {
-        const src = p.source || "unknown";
+  for (const p of papers) {
+    const combined = `${p.normalizedTitle || ""} ${p.normalizedAbstract || ""} ${(p.compoundTags || []).join(" ")}`.toLowerCase();
+    if (combined.includes(needle)) {
+      const src = p.source || "unknown";
+      sourceMentions.set(src, (sourceMentions.get(src) || 0) + 1);
+      totalMentions++;
+    }
+  }
         sourceMentions.set(src, (sourceMentions.get(src) || 0) + 1);
         totalMentions++;
       }
