@@ -12,10 +12,7 @@ import {
   saveAuditLog,
   signCoa,
 } from "../services/backendServices";
-import {
-  getCoas,
-  saveCoa,
-} from "../lib/firebaseService";
+import { TenantRepository } from "../lib/firebaseRepo";
 import type { AuditLog } from "../lib/firebaseService";
 import { DEFAULT_TENANT } from "../config";
 
@@ -60,12 +57,11 @@ export function dashboardRouter(deps: { authMiddleware: RequestHandler }): Route
 
   // ─── GET /api/dashboard/summary ────────────────────────────────────────────
   router.get("/summary", deps.authMiddleware, async (req, res) => {
-    const userContext = req.authContext;
-    const token = req.firebaseToken as string;
-    const tenantId = userContext?.tenantId || DEFAULT_TENANT;
+    const tenantId = req.authContext?.tenantId || DEFAULT_TENANT;
 
     try {
-      const coas = await getCoas(token, tenantId);
+      const repo = new TenantRepository<any>("coas", tenantId);
+      const coas = await repo.list();
       const summary = computeDashboardSummary(coas);
       res.json({
         tenantId,
@@ -114,7 +110,8 @@ export function dashboardRouter(deps: { authMiddleware: RequestHandler }): Route
     const tenantId = userContext?.tenantId || DEFAULT_TENANT;
 
     try {
-      const coas = await getCoas(token, tenantId);
+      const repo = new TenantRepository<any>("coas", tenantId);
+      const coas = await repo.list();
 
       const evaluated = coas.map((coa: any) => {
         const complianceResult = calculateCompliance({
@@ -145,7 +142,7 @@ export function dashboardRouter(deps: { authMiddleware: RequestHandler }): Route
       });
 
       for (const coa of evaluated) {
-        await saveCoa(coa, token, tenantId);
+        await repo.save({ ...coa });
       }
 
       const summary = computeDashboardSummary(evaluated);
@@ -188,7 +185,8 @@ export function dashboardRouter(deps: { authMiddleware: RequestHandler }): Route
     const { status = "All", search = "", sort = "newest" } = req.body || {};
 
     try {
-      let coas = await getCoas(token, tenantId);
+      const repo = new TenantRepository<any>("coas", tenantId);
+      let coas = await repo.list();
 
       const normalizedSearch = String(search).trim().toLowerCase();
 

@@ -14,10 +14,7 @@ import {
   createAuditHash,
   signCoa,
 } from "../services/backendServices";
-import {
-  getCoas,
-  saveCoa,
-} from "../lib/firebaseService";
+import { TenantRepository } from "../lib/firebaseRepo";
 import type { AuditLog } from "../lib/firebaseService";
 import { DEFAULT_TENANT } from "../config";
 
@@ -26,11 +23,10 @@ export function coaRouter(deps: { authMiddleware: RequestHandler }): Router {
 
   // ─── GET /api/coas ─────────────────────────────────────────────────────────
   router.get("/", deps.authMiddleware, async (req, res) => {
-    const userContext = req.authContext;
-    const token = req.firebaseToken as string;
-    const tenantId = userContext?.tenantId || DEFAULT_TENANT;
+    const tenantId = req.authContext?.tenantId || DEFAULT_TENANT;
     try {
-      const list = await getCoas(token, tenantId);
+      const repo = new TenantRepository<any>("coas", tenantId);
+      const list = await repo.list();
       res.json(list);
     } catch (err: any) {
       console.error("Error fetching COAs:", err);
@@ -44,13 +40,11 @@ export function coaRouter(deps: { authMiddleware: RequestHandler }): Router {
     deps.authMiddleware,
     [param("id").isString().trim().notEmpty().escape()],
     async (req, res) => {
-      const userContext = req.authContext;
-      const token = req.firebaseToken as string;
-      const tenantId = userContext?.tenantId || DEFAULT_TENANT;
+      const tenantId = req.authContext?.tenantId || DEFAULT_TENANT;
       const { id } = req.params;
       try {
-        const coas = await getCoas(token, tenantId);
-        const coa = coas.find((item: any) => item.id === id);
+        const repo = new TenantRepository<any>("coas", tenantId);
+        const coa = await repo.get(id);
         if (!coa) {
           return res.status(404).json({ error: "COA not found" });
         }
@@ -64,9 +58,9 @@ export function coaRouter(deps: { authMiddleware: RequestHandler }): Router {
 
   // ─── POST /api/coas ────────────────────────────────────────────────────────
   router.post("/", deps.authMiddleware, async (req, res) => {
-    const userContext = req.authContext;
+    const tenantId = req.authContext?.tenantId || DEFAULT_TENANT;
     const token = req.firebaseToken as string;
-    const tenantId = userContext?.tenantId || DEFAULT_TENANT;
+    const userContext = req.authContext;
     const coaData = req.body;
 
     if (!coaData.batchId || !coaData.strain) {
@@ -92,7 +86,8 @@ export function coaRouter(deps: { authMiddleware: RequestHandler }): Router {
       return res.status(500).json({ error: "COA signing failed" });
     }
 
-    await saveCoa(newCoa, token, tenantId);
+    const repo = new TenantRepository<any>("coas", tenantId);
+    await repo.save({ ...newCoa });
 
     const auditDetails = `Registered new Certified COA in GxP Ledger for Batch ${newCoa.batchId} (${newCoa.strain}). Total THC: ${newCoa.totalThc.toFixed(3)}%. Signed Certificate Issued: ${newCoa.complianceSignature.substring(0, 16)}...`;
     const auditEntry: Omit<AuditLog, "hash"> = {
