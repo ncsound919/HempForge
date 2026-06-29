@@ -6,8 +6,25 @@ import path from "path";
 type JsonMap = Record<string, any>;
 
 const configPath = path.join(process.cwd(), "firebase-applet-config.json");
-// Determine fallback explicitly at startup
-const useLocalFallback = process.env.USE_LOCAL_DB_FALLBACK === "true" || !fs.existsSync(configPath);
+// Determine fallback explicitly at startup.
+//   - useLocalFallback = true ONLY when NODE_ENV is explicitly not "production"
+//     AND (USE_LOCAL_DB_FALLBACK=true OR firebase-applet-config.json is missing).
+//   - In production we refuse to silently fall back to the on-disk demo store.
+//     Missing config or accidental USE_LOCAL_DB_FALLBACK=true must surface as
+//     a startup error rather than silently writing demo data into production.
+const isProduction = process.env.NODE_ENV === "production";
+const requestedFallback = process.env.USE_LOCAL_DB_FALLBACK === "true";
+const configMissing = !fs.existsSync(configPath);
+const useLocalFallback = !isProduction && (requestedFallback || configMissing);
+
+if (isProduction && requestedFallback) {
+  // Refuse loudly; we do not silently disable the production data path.
+  console.error(
+    "[firebaseService] USE_LOCAL_DB_FALLBACK=true is ignored in production. " +
+    "Falling back to adminDb only. If adminDb fails to initialize the server " +
+    "will refuse writes via the catch block below."
+  );
+}
 
 let firebaseConfig: any = null;
 if (fs.existsSync(configPath)) {
