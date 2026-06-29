@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en" data-theme="forge-default">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+
+    <title>%VITE_APP_TITLE%</title>
+    <meta
+      name="description"
+      content="HempForge is a compliance, research, COA verification, and agent-orchestrated laboratory workspace for regulated hemp operations."
+    />
+    <meta
+      name="keywords"
+      content="HempForge, hemp compliance, COA verification, cannabinoid research, laboratory workspace, regulatory audit"
+    />
+    <meta name="application-name" content="HempForge" />
+    <meta name="generator" content="Vite" />
+    <meta name="theme-color" content="#0A0F0D" />
+    <meta name="color-scheme" content="dark" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="%VITE_APP_TITLE%" />
+    <meta
+      property="og:description"
+      content="Compliance intelligence, COA verification, literature analysis, and agent-assisted laboratory operations."
+    />
+    <meta property="og:image" content="/og-cover.png" />
+    <meta property="og:site_name" content="HempForge" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="%VITE_APP_TITLE%" />
+    <meta
+      name="twitter:description"
+      content="Compliance intelligence, COA verification, literature analysis, and agent-assisted laboratory operations."
+    />
+    <meta name="twitter:image" content="/og-cover.png" />
+
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+
+    <script>
+      (() => {
+        const theme = localStorage.getItem('hf-theme');
+        if (theme) {
+          document.documentElement.setAttribute('data-theme', theme);
+        }
+      })();
+    </script>
+  </head>
+
+  <body>
+    <noscript>
+      <div
+        style="
+          min-height: 100vh;
+          display: grid;
+          place-items: center;
+          background: #0A0F0D;
+          color: #E2E8F0;
+          font-family: Inter, system-ui, sans-serif;
+          padding: 24px;
+          text-align: center;
+        "
+      >
+        HempForge requires JavaScript to run the compliance workspace.
+      </div>
+    </noscript>
+
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

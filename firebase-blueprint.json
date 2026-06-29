@@ -1,0 +1,45 @@
+{
+  "entities": {
+    "COARecord": {
+      "title": "COA Record",
+      "description": "Certificate of Analysis record from a lab.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "productName": { "type": "string" },
+        "labName": { "type": "string" },
+        "batchNumber": { "type": "string" },
+        "cbdContent": { "type": "number" },
+        "thcContent": { "type": "number" },
+        "uploadDate": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "tenantId": { "type": "string" }
+      },
+      "required": ["id", "productName", "batchNumber", "userId", "tenantId"]
+    },
+    "ResearchNote": {
+      "title": "Research Note",
+      "description": "Notes on research topics.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "topic": { "type": "string" },
+        "content": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "userId": { "type": "string" },
+        "tenantId": { "type": "string" }
+      },
+      "required": ["id", "topic", "content", "userId", "tenantId"]
+    }
+  },
+  "firestore": {
+    "/coas/{coaId}": {
+      "schema": { "$ref": "COARecord" },
+      "description": "Collection of COA records."
+    },
+    "/researchNotes/{noteId}": {
+      "schema": { "$ref": "ResearchNote" },
+      "description": "Collection of research notes."
+    }
+  }
+}

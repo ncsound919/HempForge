@@ -1,0 +1,8 @@
+{
+  "firestore": [
+    {
+      "database": "ai-studio-hempforge-d708b592-7e59-4bb6-8338-12f338f12f7e",
+      "rules": "firestore.rules"
+    }
+  ]
+}

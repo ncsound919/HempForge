@@ -1,0 +1,6 @@
+{
+  "name": "HempForge",
+  "description": "Open Source Agentic Compliance & Research Accelerator for Hemp Data",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
