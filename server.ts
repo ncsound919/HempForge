@@ -7,6 +7,7 @@ import { body, param, validationResult } from "express-validator";
 import { GoogleGenAI, Type } from "@google/genai";
 import fs from "fs";
 import { ingestLiterature, HEMP_QUERY_TERMS } from "./src/lib/literatureService";
+import { parseCOAWithRegex } from "./src/lib/coaParser";
 import {
   AuditLog,
   MetrcPackage,
@@ -89,6 +90,36 @@ import {
   GEMINI_LIMIT_MAX_REQUESTS
 } from "./src/services/backendServices";
 
+import {
+  calculateCompliance,
+  calculateDecarbKinetics,
+  calculateTotalThc,
+  determineComplianceStatus,
+  evaluateCOACompliance,
+  DECARB_CONVERSION_FACTOR,
+  NC_TOTAL_THC_THRESHOLD,
+  NC_AT_RISK_THRESHOLD,
+  FDA_SERVING_CAP_MG,
+} from "./src/lib/complianceEngine";
+
+import {
+  createLiveAIProvenance,
+  createSimulatedProvenance,
+  createFormulaProvenance,
+  createHeuristicProvenance,
+  type OutputClassification,
+} from "./src/lib/provenanceEngine";
+
+import {
+  createChainedAuditEntry,
+  verifyAuditChain,
+  type AuditEntry as ChainedAuditEntry,
+} from "./src/lib/auditEngine";
+
+function isChainedAuditEntry(log: AuditLog): log is AuditLog & ChainedAuditEntry {
+  return typeof log.sequenceNumber === "number" && typeof log.previousHash === "string";
+}
+
 async function startServer() {
   const app = express();
   const PORT = 3000;
@@ -109,9 +140,40 @@ async function startServer() {
     }
   });
 
-  // Public Health Endpoint
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "healthy", timestamp: new Date().toISOString() });
+  // Public Health Endpoint with dependency status (Criterion 10: Failure Honesty)
+  app.get("/api/health", async (req, res) => {
+    const geminiConfigured = isValidGeminiKey(process.env.GEMINI_API_KEY?.trim());
+    const firestoreAvailable = adminDb !== null;
+    const coaSigningConfigured = !!process.env.COA_SIGNING_SECRET;
+
+    let ollamaAvailable = false;
+    try {
+      const ollamaStatus = await ollamaHealthCheck();
+      ollamaAvailable = ollamaStatus.available;
+    } catch { /* ignore */ }
+
+    const degradedServices: string[] = [];
+    if (!geminiConfigured) degradedServices.push("gemini-ai (chat, paper generation, COA parsing will use heuristic fallback)");
+    if (!firestoreAvailable) degradedServices.push("firestore (using local fallback DB — data is NOT persistent)");
+    if (!coaSigningConfigured) degradedServices.push("coa-signing (COA cryptographic signatures unavailable)");
+    if (!ollamaAvailable) degradedServices.push("ollama (local AI inference unavailable)");
+
+    const status = degradedServices.length === 0 ? "healthy" : "degraded";
+
+    res.json({
+      status,
+      timestamp: new Date().toISOString(),
+      services: {
+        gemini: { available: geminiConfigured, classification: geminiConfigured ? "live-ai-inference" : "heuristic-fallback" },
+        ollama: { available: ollamaAvailable, classification: ollamaAvailable ? "live-ai-inference" : "unavailable" },
+        firestore: { available: firestoreAvailable, classification: firestoreAvailable ? "production-real" : "demo-only" },
+        coaSigning: { available: coaSigningConfigured, classification: coaSigningConfigured ? "production-real" : "unavailable" },
+      },
+      degradedServices,
+      disclaimer: degradedServices.length > 0
+        ? "⚠️ Some services are unavailable. Outputs from degraded services will be clearly labeled as simulated/heuristic and MUST NOT be used for compliance decisions."
+        : "All services operational. Outputs are live and verified.",
+    });
   });
 
   // Public COA Cryptographic Verification Endpoint (Phase 2 - No auth required)
@@ -277,6 +339,77 @@ async function startServer() {
 
     await saveAuditLog(hashedLog, req.firebaseToken as string);
     res.status(201).json(hashedLog);
+  });
+
+  // Audit chain integrity verification endpoint (ALCOA+ criterion 4)
+  app.post("/api/audit/verify-chain", authMiddleware, async (req, res) => {
+    const userContext = req.authContext;
+    const userId = userContext?.userId || "unknown-user";
+
+    // Rate limit: verification is expensive, limit to prevent abuse
+    const rateLimit = checkGeminiRateLimit(userId);
+    if (!rateLimit.allowed) {
+      return res.status(429).json({
+        error: "Rate limit exceeded for audit verification.",
+        details: `Please try again after ${new Date(rateLimit.resetTime).toLocaleTimeString()}.`
+      });
+    }
+
+    if (userContext?.userRole !== "Quality Auditor" && userContext?.userRole !== "Lab Admin") {
+      return res.status(403).json({ error: "Forbidden: Quality Auditor or Lab Admin role required for chain verification" });
+    }
+
+    try {
+      const logs = await getAuditLogs(req.firebaseToken as string);
+      const tenantId = userContext?.tenantId || DEFAULT_TENANT;
+      const tenantLogs = logs.filter(log => log.tenantId === tenantId);
+
+      // Separate chain-linked entries (have sequenceNumber + previousHash) from legacy entries
+      const chainEntries = tenantLogs.filter(isChainedAuditEntry) as unknown as ChainedAuditEntry[];
+
+      const legacyLogs = tenantLogs.filter(log => !isChainedAuditEntry(log));
+
+      // Verify chain-linked entries using verifyAuditChain (checks hash integrity + chain linking)
+      const chainResult = verifyAuditChain(chainEntries);
+
+      // Verify legacy entries using the original hash function
+      const legacyResults = legacyLogs.map(log => {
+        const expectedHash = createAuditHash({
+          id: log.id,
+          timestamp: log.timestamp,
+          userId: log.userId,
+          userRole: log.userRole,
+          tenantId: log.tenantId,
+          action: log.action,
+          details: log.details,
+          category: log.category,
+        });
+        return {
+          id: log.id,
+          timestamp: log.timestamp,
+          action: log.action,
+          hashValid: log.hash === expectedHash,
+          storedHash: log.hash?.substring(0, 16) + "...",
+        };
+      });
+
+      const legacyCorrupted = legacyResults.filter(r => !r.hashValid).length;
+
+      res.json({
+        totalEntries: tenantLogs.length,
+        chainEntries: chainResult.totalEntries,
+        chainVerified: chainResult.verifiedEntries,
+        chainIntact: chainResult.valid && legacyCorrupted === 0,
+        chainDetails: chainResult,
+        legacyEntries: legacyLogs.length,
+        legacyVerified: legacyLogs.length - legacyCorrupted,
+        legacyCorrupted,
+        verifiedAt: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      console.error("Audit chain verification error:", err);
+      res.status(500).json({ error: "Internal server error" });
+    }
   });
 
   // 2. Metrc / Seed-to-Sale Track & Trace APIs - Auth Protected
@@ -467,53 +600,74 @@ async function startServer() {
   // 5. Compliance threshold engine - Auth Protected
   app.post("/api/compliance/calculate", authMiddleware, (req, res) => {
     const { thca, d9thc, totalThc, productType, servingSizeGrams, cumulativeThcMg } = req.body;
+    const userContext = req.authContext;
     
-    const calculatedTotal = thca !== undefined && d9thc !== undefined 
-      ? parseFloat(((thca * 0.877) + d9thc).toFixed(3)) 
-      : parseFloat((totalThc || 0).toFixed(3));
+    const result = calculateCompliance({ thca, d9thc, totalThc, productType, servingSizeGrams, cumulativeThcMg });
 
-    let status: "Compliant" | "At Risk" | "Non-Compliant" = "Compliant";
-    const alerts: string[] = [];
+    const response = createFormulaProvenance(
+      {
+        calculatedTotal: result.calculatedTotal,
+        status: result.status,
+        alerts: result.alerts,
+        timestamp: result.processingIntegrity.computedAt,
+        governingAuthority: result.processingIntegrity.governingAuthority,
+        processingIntegrity: result.processingIntegrity,
+      },
+      {
+        formula: result.processingIntegrity.formula,
+        inputs: { thca, d9thc, totalThc, productType, servingSizeGrams, cumulativeThcMg },
+        userId: userContext?.userId || "unknown",
+        userRole: userContext?.userRole || "Operator",
+        tenantId: userContext?.tenantId || DEFAULT_TENANT,
+      }
+    );
 
-    if (calculatedTotal > 0.3) {
-      status = "Non-Compliant";
-      alerts.push(`Dry weight Total THC (${calculatedTotal}%) exceeds legal NC standard ≤0.300% (Nov 2026 Caps).`);
-    } else if (calculatedTotal >= 0.25) {
-      status = "At Risk";
-      alerts.push(`Dry weight Total THC (${calculatedTotal}%) approaches maximum legal threshold. Risk of harvest drift or extraction spike.`);
-    }
-
-    if (productType === "Infused-Edible" && cumulativeThcMg && cumulativeThcMg > 0.4) {
-      status = "Non-Compliant";
-      alerts.push(`Cumulative THC dosage (${cumulativeThcMg}mg/serving) violates strict upcoming Federal cap of 0.4mg per serving.`);
-    }
-
-    res.json({
-      calculatedTotal,
-      status,
-      alerts,
-      timestamp: new Date().toISOString(),
-      governingAuthority: "NC Dept of Agriculture / Federal FDA"
-    });
+    res.json(response);
   });
 
-  // 6. Security incident runbook info - Auth Protected
+  // 6. Security posture & policy - Auth Protected (Criterion: Truthfulness of claims)
   app.get("/api/security/policy", authMiddleware, (req, res) => {
+    const geminiConfigured = isValidGeminiKey(process.env.GEMINI_API_KEY?.trim());
+    const firestoreAvailable = adminDb !== null;
+
     res.json({
-      governanceModel: "GxP / SOC-2 Framework Compliance Plan",
-      encryptionAtRest: "AES-256 (GCP Cloud Storage and Firestore Encrypted Keys)",
-      encryptionInTransit: "TLS 1.3 / HTTPS Only",
-      incidentResponsePlan: {
-        lastDrillDate: "2026-05-12",
-        disasterRecoveryRTO: "2 Hours",
-        disasterRecoveryRPO: "15 Minutes",
-        breachNotificationSOP: "Within 72 hours of verification, client tenants and state authorities (NC Attorney General) will be formally notified as per NC Identity Theft Protection Act guidelines."
+      _outputClassification: "production-real",
+      _disclaimer: "This policy document describes the current security posture. Items marked 'IMPLEMENTED' are active; items marked 'PLANNED' are design targets not yet verified.",
+      governanceModel: {
+        framework: "GxP / SOC-2 Framework Compliance Plan",
+        status: "PARTIAL — Controls are implemented but formal SOC 2 Type II audit has not been completed."
       },
-      privacyDataInventory: {
-        ccpaRightsHandled: ["Access", "De-identification", "Delete", "Opt-out of sale"],
-        collectedDataTypes: ["User Profile metadata", "COA analytical outputs", "Instrument calibration metrics", "Metrc package tracking indices"],
-        dataMinimizationRule: "All survey, dispensary client, and medical consumer indices are cryptographically de-identified prior to any statistical exposure mapping."
-      }
+      implementedControls: {
+        authentication: "Firebase Auth with JWT token verification (IMPLEMENTED)",
+        authorization: "Role-based access control with tenant isolation (IMPLEMENTED)",
+        auditLogging: "ALCOA+ compliant hash-signed audit entries (IMPLEMENTED)",
+        inputValidation: "express-validator on critical endpoints (IMPLEMENTED)",
+        rateLimiting: "Per-user rate limiting on AI endpoints (IMPLEMENTED)",
+        tenantIsolation: "Tenant-scoped data access on all CRUD operations (IMPLEMENTED)",
+        coaSigning: process.env.COA_SIGNING_SECRET ? "HMAC-SHA256 cryptographic COA signatures (IMPLEMENTED)" : "COA signing configured but secret not set (DEGRADED)",
+      },
+      infrastructureControls: {
+        encryptionAtRest: "AES-256 via GCP Cloud Storage and Firestore (GCP-MANAGED)",
+        encryptionInTransit: "TLS 1.3 / HTTPS (INFRASTRUCTURE-LEVEL)",
+        dataResidence: "US region (GCP default)",
+      },
+      plannedControls: {
+        mfa: "Multi-factor authentication (PLANNED — not yet enforced)",
+        keyRotation: "Automated secret rotation (PLANNED)",
+        penetrationTesting: "Annual third-party pen test (PLANNED)",
+        socAudit: "SOC 2 Type II engagement (PLANNED)",
+        disasterRecovery: "Formal DR testing (PLANNED — RTO target 2h, RPO target 15m)",
+      },
+      privacyPosture: {
+        dataTypes: ["User Profile metadata", "COA analytical outputs", "Instrument calibration metrics", "Metrc package tracking indices"],
+        retentionPolicy: "PLANNED — formal retention schedule not yet implemented",
+        deletionWorkflow: "PLANNED — manual deletion available, automated workflow pending",
+        dataMinimization: "Principle applied but formal classification not completed",
+      },
+      currentServiceStatus: {
+        firestore: firestoreAvailable ? "ACTIVE" : "FALLBACK (local-db)",
+        aiInference: geminiConfigured ? "ACTIVE (Gemini)" : "DEGRADED (heuristic fallback)",
+      },
     });
   });
 
@@ -587,7 +741,18 @@ async function startServer() {
       };
       await saveAuditLog(hashedAudit, req.firebaseToken as string);
 
-      return res.json({ text: responseText, agentType, simulated: true });
+      const heuristicResponse = createHeuristicProvenance(
+        { text: responseText, agentType, simulated: true },
+        {
+          method: "keyword-signal-scoring",
+          inputs: { message: message.substring(0, 100), detectedAgent: agentType },
+          userId: userContext?.userId || "system-agent",
+          userRole: userContext?.userRole || "Operator",
+          tenantId: userContext?.tenantId || DEFAULT_TENANT,
+        }
+      );
+
+      return res.json(heuristicResponse);
     }
 
     try {
@@ -627,7 +792,19 @@ async function startServer() {
       };
       await saveAuditLog(hashedAudit, req.firebaseToken as string);
 
-      res.json({ text, agentType, simulated: false });
+      const liveResponse = createLiveAIProvenance(
+        { text, agentType, simulated: false },
+        {
+          model: "gemini-2.5-flash",
+          inputs: { messageLength: message.length, historyLength: history.length },
+          steps: ["User message received", "History context assembled", "Gemini inference executed", "Agent type extracted"],
+          userId: userContext?.userId || "unknown-user",
+          userRole: userContext?.userRole || "Operator",
+          tenantId: userContext?.tenantId || DEFAULT_TENANT,
+        }
+      );
+
+      res.json(liveResponse);
 
     } catch (err: any) {
       console.error("Gemini Chat API Error:", err);
@@ -770,14 +947,9 @@ async function startServer() {
 
     const apiKey = process.env.GEMINI_API_KEY?.trim();
     
-    // Calculate simulated kinetics if key is not configured or as baseline
-    const conversionFactor = 0.877;
-    const rateConstant = 0.00008 * Math.exp(0.058 * (temp - 25));
-    const finalThca = thca * Math.exp(-rateConstant * duration);
-    const convertedThc = thca - finalThca;
-    const finalD9Thc = d9thc + (convertedThc * conversionFactor);
-    const totalThcComputed = finalD9Thc + (finalThca * conversionFactor);
-    const isCompliant = totalThcComputed <= 0.3;
+    // Calculate kinetics using the compliance engine module
+    const kinetics = calculateDecarbKinetics({ thca, d9thc, temp, duration });
+    const { rateConstant, finalThca, finalD9Thc, totalThcComputed, isCompliant } = kinetics;
 
     if (!isValidGeminiKey(apiKey)) {
       // Simulate high-quality markdown and structured meta when Gemini key is absent
@@ -836,8 +1008,8 @@ Trend analysis and kinetic models are computed deterministically from the provid
         userId: userContext?.userId || "system-agent",
         userRole: userContext?.userRole || "Operator",
         tenantId: userContext?.tenantId || DEFAULT_TENANT,
-        action: "AI_PAPER_GENERATOR",
-        details: `Generated research paper paper for strain '${strain}' under ${temp}°C thermal model. Status: ${isCompliant ? "Compliant" : "Non-compliant"}.`,
+        action: "AI_PAPER_SIMULATED",
+        details: `⚠️ SIMULATED: Generated research paper template for strain '${strain}' under ${temp}°C thermal model. Status: ${isCompliant ? "Compliant" : "Non-compliant"}. GEMINI_API_KEY not configured — output is deterministic template, NOT live AI inference.`,
         category: "AI_INFERENCE"
       };
       const hashedAudit = {
@@ -846,7 +1018,16 @@ Trend analysis and kinetic models are computed deterministically from the provid
       };
       await saveAuditLog(hashedAudit, req.firebaseToken as string);
 
-      return res.json(parsedData);
+      const simulatedResponse = createSimulatedProvenance(parsedData, {
+        reason: "GEMINI_API_KEY not configured or invalid",
+        fallbackMethod: "deterministic-kinetics-template",
+        inputs: { strain, thca, d9thc, moisture, temp, duration, blendRatios, templateType },
+        userId: userContext?.userId || "system-agent",
+        userRole: userContext?.userRole || "Operator",
+        tenantId: userContext?.tenantId || DEFAULT_TENANT,
+      });
+
+      return res.json(simulatedResponse);
     }
 
     try {
@@ -881,7 +1062,19 @@ Trend analysis and kinetic models are computed deterministically from the provid
       };
       await saveAuditLog(hashedAudit, req.firebaseToken as string);
 
-      res.json({ ...generated, simulated: false });
+      const liveResponse = createLiveAIProvenance(
+        { ...generated, simulated: false },
+        {
+          model: "gemini-2.5-flash",
+          inputs: { strain, thca, d9thc, moisture, temp, duration, blendRatios, templateType },
+          steps: ["Kinetics calculated", "Gemini paper generation invoked", "Structured JSON response parsed"],
+          userId: userContext?.userId || "unknown-user",
+          userRole: userContext?.userRole || "Operator",
+          tenantId: userContext?.tenantId || DEFAULT_TENANT,
+        }
+      );
+
+      res.json(liveResponse);
 
     } catch (err: any) {
       console.error("Gemini Paper Generation Error:", err);
@@ -940,47 +1133,20 @@ Trend analysis and kinetic models are computed deterministically from the provid
       }
 
       // Regex fallback when both Gemini and Ollama are unavailable
-      const rawLower = coaRawText.toLowerCase();
-      let strain = "Sour Space Candy";
-      if (rawLower.includes("lifter")) strain = "Lifter CBD";
-      else if (rawLower.includes("cherry")) strain = "Cherry Wine";
-      else if (rawLower.includes("hawaiian")) strain = "Hawaiian Haze";
-      else if (rawLower.includes("dream")) strain = "Carolina Dream";
-      else {
-        const strainMatch = coaRawText.match(/strain:\s*([^\n\r,]+)/i) || coaRawText.match(/strain\s+name:\s*([^\n\r,]+)/i);
-        if (strainMatch) strain = strainMatch[1].trim();
-      }
-
-      let thca = 0.28;
-      const thcaMatch = coaRawText.match(/thca:\s*([0-9.]+)/i) || coaRawText.match(/thc-a:\s*([0-9.]+)/i);
-      if (thcaMatch) thca = parseFloat(thcaMatch[1]);
-
-      let d9thc = 0.04;
-      const d9Match = coaRawText.match(/delta-9-thc:\s*([0-9.]+)/i) || coaRawText.match(/d9-thc:\s*([0-9.]+)/i) || coaRawText.match(/thc:\s*([0-9.]+)/i);
-      if (d9Match) d9thc = parseFloat(d9Match[1]);
-
-      const calculatedTotal = parseFloat(((thca * 0.877) + d9thc).toFixed(3));
-      let status: "Compliant" | "At Risk" | "Non-Compliant" = "Compliant";
-      let recommendation = "";
-
-      if (calculatedTotal > 0.3) {
-        status = "Non-Compliant";
-        recommendation = "Divert batch immediately to extraction or remediation. Delayed harvest contributed to pre-decarb THC synthesis spike.";
-      } else if (calculatedTotal >= 0.25) {
-        status = "At Risk";
-        recommendation = "Monitor nearby fields closely. Variance levels indicate upcoming batches will test over limits.";
-      }
+      const generatedBatchId = `B-${crypto.randomUUID().slice(0, 8)}`;
+      const parseResult = parseCOAWithRegex(coaRawText, generatedBatchId);
 
       const parsedCoa = {
-        batchId: `B-${crypto.randomUUID().slice(0, 8)}`,
-        strain,
-        thca,
-        d9thc,
-        totalThc: calculatedTotal,
-        status,
-        recommendation: recommendation || undefined,
+        batchId: parseResult.batchId,
+        strain: parseResult.strain,
+        thca: parseResult.thca,
+        d9thc: parseResult.d9thc,
+        totalThc: parseResult.totalThc,
+        status: parseResult.status,
+        recommendation: parseResult.recommendation || undefined,
+        confidence: parseResult.confidence,
         simulated: true,
-        note: "Simulated extraction parser (GEMINI_API_KEY not configured, Ollama unavailable)."
+        note: `⚠️ HEURISTIC FALLBACK: Parsed using regex pattern matching (GEMINI_API_KEY not configured, Ollama unavailable). Confidence: ${(parseResult.confidence * 100).toFixed(0)}%. Do NOT use for compliance decisions without verified lab analysis.`
       };
 
       const auditEntry: Omit<AuditLog, "hash"> = {
@@ -990,7 +1156,7 @@ Trend analysis and kinetic models are computed deterministically from the provid
         userRole: userContext?.userRole || "Operator",
         tenantId: userContext?.tenantId || DEFAULT_TENANT,
         action: "AI_SIMULATED_OCR",
-        details: `Simulated OCR parsing for strain '${strain}' (THCa ${thca}%, D9 ${d9thc}%). Computed status: ${status}.`,
+        details: `⚠️ HEURISTIC FALLBACK: Regex-based COA parsing for strain '${parseResult.strain}' (THCa ${parseResult.thca}%, D9 ${parseResult.d9thc}%). Computed status: ${parseResult.status}. Confidence: ${(parseResult.confidence * 100).toFixed(0)}%. Both Gemini and Ollama unavailable.`,
         category: "AI_INFERENCE"
       };
       const hashedAudit = {
@@ -999,7 +1165,15 @@ Trend analysis and kinetic models are computed deterministically from the provid
       };
       await saveAuditLog(hashedAudit, req.firebaseToken as string);
 
-      return res.json(parsedCoa);
+      const heuristicResponse = createHeuristicProvenance(parsedCoa, {
+        method: "regex-pattern-extraction",
+        inputs: { coaTextLength: coaRawText.length, extractedStrain: parseResult.strain, extractedThca: parseResult.thca, extractedD9thc: parseResult.d9thc, confidence: parseResult.confidence },
+        userId: userContext?.userId || "system-agent",
+        userRole: userContext?.userRole || "Operator",
+        tenantId: userContext?.tenantId || DEFAULT_TENANT,
+      });
+
+      return res.json(heuristicResponse);
     }
 
     try {
@@ -1023,7 +1197,16 @@ Trend analysis and kinetic models are computed deterministically from the provid
       };
       await saveAuditLog(hashedAudit, req.firebaseToken as string);
 
-      res.json(parsedData);
+      const liveResponse = createLiveAIProvenance(parsedData, {
+        model: "gemini-2.5-flash",
+        inputs: { coaTextLength: coaRawText.length },
+        steps: ["Raw COA text received", "Gemini structured extraction invoked", "JSON response parsed", "Compliance status determined"],
+        userId: userContext?.userId || "unknown-user",
+        userRole: userContext?.userRole || "Operator",
+        tenantId: userContext?.tenantId || DEFAULT_TENANT,
+      });
+
+      res.json(liveResponse);
 
     } catch (err: any) {
       console.error("COA Ingestion API Error:", err);
@@ -1632,35 +1815,29 @@ Return this EXACTLY as a JSON object matching this schema:
       const coas = await getCoas(token, tenantId);
   
       const evaluated = coas.map((coa) => {
-        const calculatedTotal =
-          coa.thca !== undefined && coa.d9thc !== undefined
-            ? parseFloat(((Number(coa.thca) * 0.877) + Number(coa.d9thc)).toFixed(3))
-            : parseFloat(Number(coa.totalThc || 0).toFixed(3));
+        const complianceResult = calculateCompliance({
+          thca: coa.thca !== undefined ? Number(coa.thca) : undefined,
+          d9thc: coa.d9thc !== undefined ? Number(coa.d9thc) : undefined,
+          totalThc: coa.totalThc ? Number(coa.totalThc) : undefined,
+        });
   
-        let status: "Compliant" | "At Risk" | "Non-Compliant" = "Compliant";
-        let recommendation = coa.recommendation;
-  
-        if (calculatedTotal > 0.3) {
-          status = "Non-Compliant";
-          recommendation =
-            recommendation ||
-            "Divert batch to remediation or extraction review due to threshold breach.";
-        } else if (calculatedTotal >= 0.25) {
-          status = "At Risk";
-          recommendation =
-            recommendation ||
-            "Monitor variance closely; batch is approaching threshold.";
-        }
+        const recommendation = coa.recommendation || (
+          complianceResult.status === "Non-Compliant"
+            ? "Divert batch to remediation or extraction review due to threshold breach."
+            : complianceResult.status === "At Risk"
+            ? "Monitor variance closely; batch is approaching threshold."
+            : undefined
+        );
   
         return {
           ...coa,
-          totalThc: calculatedTotal,
-          status,
+          totalThc: complianceResult.calculatedTotal,
+          status: complianceResult.status,
           recommendation,
           complianceSignature: signCoa({
             ...coa,
-            totalThc: calculatedTotal,
-            status,
+            totalThc: complianceResult.calculatedTotal,
+            status: complianceResult.status,
             recommendation,
           }),
         };

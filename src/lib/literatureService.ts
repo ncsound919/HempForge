@@ -62,9 +62,10 @@ function reconstructAbstract(inverted: Record<string, number[]>): string {
 // ── PubMed ──────────────────────────────────────────────────────────────────
 async function fetchPubMed(query: string, maxResults = 20): Promise<ResearchPaper[]> {
   try {
+    const contactEmail = process.env.PUBMED_CONTACT_EMAIL || "contact@hempforge.app";
     const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi` +
       `?db=pubmed&term=${encodeURIComponent(query)}&retmax=${maxResults}&retmode=json` +
-      `&email=ncsound919@gmail.com&tool=HempForge`;
+      `&email=${encodeURIComponent(contactEmail)}&tool=HempForge`;
     const searchRes = await fetch(searchUrl);
     if (!searchRes.ok) throw new Error(`PubMed search responded with status ${searchRes.status}`);
     const searchData = await searchRes.json();
@@ -143,8 +144,9 @@ async function fetchPubMed(query: string, maxResults = 20): Promise<ResearchPape
 // ── OpenAlex ────────────────────────────────────────────────────────────────
 async function fetchOpenAlex(query: string, maxResults = 20): Promise<ResearchPaper[]> {
   try {
+    const contactEmail = process.env.PUBMED_CONTACT_EMAIL || "contact@hempforge.app";
     const url = `https://api.openalex.org/works?search=${encodeURIComponent(query)}` +
-      `&per-page=${maxResults}&mailto=ncsound919@gmail.com` +
+      `&per-page=${maxResults}&mailto=${encodeURIComponent(contactEmail)}` +
       `&filter=open_access.is_oa:true`;
     const res = await fetch(url);
     if (!res.ok) throw new Error(`OpenAlex responded with status ${res.status}`);
