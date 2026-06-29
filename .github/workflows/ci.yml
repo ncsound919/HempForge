@@ -12,6 +12,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    env:
+      NODE_ENV: test
+      USE_LOCAL_DB_FALLBACK: "true"
+      COA_SIGNING_SECRET: "ci-test-secret-not-for-production-use-only-32chars"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,17 +33,25 @@ jobs:
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      - name: TypeScript typecheck (lint script)
+      - name: TypeScript typecheck
         run: npm run lint
 
-      - name: Vitest unit suite (legacy compliance / audit / permissions tests)
-        run: npm test
+      - name: Vitest unit suite (compliance / audit / permissions)
+        run: npm test -- --coverage --reporter=verbose
 
       - name: Playwright unit suite
         run: npm run test:unit
 
       - name: Playwright API suite
         run: npm run test:api
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
 
       - name: Upload Playwright report on failure
         if: failure()
