@@ -571,7 +571,8 @@ function computeCrossSourceValidation(
       const maxEntropy = Math.log2(sourceCount);
       agreementScore = maxEntropy > 0 ? Math.round((entropy / maxEntropy) * 100) : 0;
     } else if (sourceCount === 1) {
-      agreementScore = 25; // Single source = low validation
+      // Single-source signals have inherently low cross-validation confidence
+      agreementScore = 25;
     }
 
     return { compound: tc.name, sourceCount, sources, agreementScore, totalMentions };

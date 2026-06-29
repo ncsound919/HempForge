@@ -26,6 +26,10 @@ const HEMP_QUERY_TERMS = [
   'hemp terpene profile', 'cannabinoid formulation stability'
 ];
 
+// Deduplication constants
+const TITLE_DEDUP_KEY_LENGTH = 80; // Truncate normalized titles for dedup key generation
+const DEFAULT_API_RATE_LIMIT_MS = 200; // Minimum inter-request delay per source to avoid API throttling
+
 // Helper to handle both arrays and objects gracefully from API responses
 function ensureArray<T>(val: any): T[] {
   if (!val) return [];
@@ -253,7 +257,7 @@ const sourceDelays = new Map<string, number>();
 async function rateLimitedFetch<T>(
   sourceName: string,
   fetcher: () => Promise<T>,
-  minDelayMs = 200
+  minDelayMs = DEFAULT_API_RATE_LIMIT_MS
 ): Promise<T> {
   const lastCall = sourceDelays.get(sourceName) || 0;
   const elapsed = Date.now() - lastCall;
@@ -289,7 +293,7 @@ export async function ingestLiterature(query: string, tenantId: string): Promise
   const deduped = all.filter(p => {
     const doiNorm = p.doi?.toLowerCase().replace(/^https?:\/\/doi\.org\//, '').trim();
     const pmidNorm = p.pmid?.trim();
-    const titleKey = p.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 80);
+    const titleKey = p.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, TITLE_DEDUP_KEY_LENGTH);
     const urlHash = p.url ? crypto.createHash('md5').update(p.url).digest('hex').slice(0, 16) : '';
 
     // Check all identity keys independently for cross-source dedup

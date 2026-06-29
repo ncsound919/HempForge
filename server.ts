@@ -1389,12 +1389,15 @@ Return this EXACTLY as a JSON object matching this schema:
 
   // Enhanced Trend Snapshot with Mann-Kendall, burst detection, and cross-source validation
   app.get("/api/literature/trend-snapshot", authMiddleware, async (req: any, res: any) => {
-    const { tenantId } = req.authContext || {};
+    const { tenantId, userId } = req.authContext || {};
     if (!tenantId) {
       return res.status(401).json({ error: "Unauthorized: Missing tenant context" });
     }
     if (!adminDb) {
       return res.status(503).json({ error: "Database not initialized" });
+    }
+    if (!checkLitRateLimit(userId || "anonymous")) {
+      return res.status(429).json({ error: "Rate limit exceeded for trend snapshot requests." });
     }
     try {
       const dateKey = new Date().toISOString().slice(0, 10);
