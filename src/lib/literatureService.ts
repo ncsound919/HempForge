@@ -251,21 +251,40 @@ async function fetchSemanticScholar(query: string, maxResults = 20): Promise<Res
   }
 }
 
-// ── Rate-limited fetcher with exponential backoff ────────────────────────────
+// ── Rate-limited fetcher (per-source queue + minimum delay) ──────────────────
 const sourceDelays = new Map<string, number>();
+const sourceQueues = new Map<string, Promise<void>>();
 
 async function rateLimitedFetch<T>(
   sourceName: string,
   fetcher: () => Promise<T>,
   minDelayMs = DEFAULT_API_RATE_LIMIT_MS
 ): Promise<T> {
-  const lastCall = sourceDelays.get(sourceName) || 0;
-  const elapsed = Date.now() - lastCall;
-  if (elapsed < minDelayMs) {
-    await new Promise(resolve => setTimeout(resolve, minDelayMs - elapsed));
+  const prev = sourceQueues.get(sourceName) || Promise.resolve();
+
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => {
+    release = resolve;
+  });
+
+  const queued = prev.then(() => gate);
+  sourceQueues.set(sourceName, queued);
+
+  await prev;
+  try {
+    const lastCall = sourceDelays.get(sourceName) || 0;
+    const elapsed = Date.now() - lastCall;
+    if (elapsed < minDelayMs) {
+      await new Promise(resolve => setTimeout(resolve, minDelayMs - elapsed));
+    }
+    sourceDelays.set(sourceName, Date.now());
+    return await fetcher();
+  } finally {
+    release();
+    if (sourceQueues.get(sourceName) === queued) {
+      sourceQueues.delete(sourceName);
+    }
   }
-  sourceDelays.set(sourceName, Date.now());
-  return fetcher();
 }
 
 // ── Main export: fetch all sources for a query ────────────────────────────
