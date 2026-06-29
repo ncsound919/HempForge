@@ -38,6 +38,14 @@ import {
   getChainState,
 } from "./src/lib/auditEngine";
 
+import {
+  parseCOAWithRegex,
+  extractStrain,
+  extractThca,
+  extractD9Thc,
+  extractBatchId,
+} from "./src/lib/coaParser";
+
 // These functions are now imported from complianceEngine.ts
 // Tests below verify the extracted module matches the original behavior
 
@@ -750,5 +758,122 @@ describe("15. Failure Honesty - Missing Dependency Handling (Criterion 10)", () 
   it("should not silently accept placeholder keys", () => {
     expect(isValidGeminiKey("AIzaSy")).toBe(false); // too short
     expect(isValidGeminiKey("NotAIzaSy_something")).toBe(false); // wrong prefix
+  });
+});
+
+describe("16. COA Parsing Accuracy (Ground-Truth Samples)", () => {
+  const SAMPLE_COA_1 = `
+    Certificate of Analysis
+    Lab: Wilmington Analytical Chemistry Services
+    Batch ID: B-9904
+    Strain: Lifter CBD
+    Sample Name: Lifter CBD - Lot 44
+    THCa: 0.28%
+    Delta-9-THC: 0.04%
+    CBD: 14.2%
+    CBG: 0.8%
+    Date Tested: 2026-06-15
+  `;
+
+  const SAMPLE_COA_2 = `
+    NC Hemp Lab Report
+    Batch #: HWH-2026-001
+    Cultivar: Hawaiian Haze
+    THCA: 0.35
+    D9-THC: 0.03
+    Total Cannabinoids: 18.4%
+    Status: Requires Review
+  `;
+
+  const SAMPLE_COA_MINIMAL = `
+    Some random text about hemp
+    thc: 0.05
+    strain: Carolina Dream
+  `;
+
+  const SAMPLE_COA_EMPTY = "This document contains no parseable cannabinoid data.";
+
+  it("should extract strain from explicit strain field", () => {
+    const result = extractStrain(SAMPLE_COA_1);
+    expect(result.extracted).toBe(true);
+    expect(result.value).toContain("Lifter");
+  });
+
+  it("should extract strain from cultivar field", () => {
+    const result = extractStrain(SAMPLE_COA_2);
+    expect(result.extracted).toBe(true);
+    expect(result.value).toContain("Hawaiian");
+  });
+
+  it("should extract THCa correctly", () => {
+    const result = extractThca(SAMPLE_COA_1);
+    expect(result.extracted).toBe(true);
+    expect(result.value).toBe(0.28);
+  });
+
+  it("should extract D9-THC correctly", () => {
+    const result = extractD9Thc(SAMPLE_COA_1);
+    expect(result.extracted).toBe(true);
+    expect(result.value).toBe(0.04);
+  });
+
+  it("should extract batch ID correctly", () => {
+    const result = extractBatchId(SAMPLE_COA_1);
+    expect(result.extracted).toBe(true);
+    expect(result.value).toBe("B-9904");
+  });
+
+  it("should extract batch ID from alternative format", () => {
+    const result = extractBatchId(SAMPLE_COA_2);
+    expect(result.extracted).toBe(true);
+    expect(result.value).toBe("HWH-2026-001");
+  });
+
+  it("should parse full COA with correct compliance status", () => {
+    const result = parseCOAWithRegex(SAMPLE_COA_1, "B-fallback");
+    expect(result.strain).toContain("Lifter");
+    expect(result.thca).toBe(0.28);
+    expect(result.d9thc).toBe(0.04);
+    expect(result.totalThc).toBe(0.286);
+    expect(result.status).toBe("At Risk");
+    expect(result.confidence).toBeGreaterThan(0.5);
+    expect(result.extractionDetails.thcaExtracted).toBe(true);
+    expect(result.extractionDetails.d9thcExtracted).toBe(true);
+  });
+
+  it("should detect non-compliant COA correctly", () => {
+    const result = parseCOAWithRegex(SAMPLE_COA_2, "B-fallback");
+    expect(result.thca).toBe(0.35);
+    expect(result.d9thc).toBe(0.03);
+    expect(result.status).toBe("Non-Compliant");
+    expect(result.totalThc).toBeGreaterThan(0.3);
+  });
+
+  it("should have low confidence for minimal COA text", () => {
+    const result = parseCOAWithRegex(SAMPLE_COA_MINIMAL, "B-fallback");
+    expect(result.strain).toContain("Carolina Dream");
+    expect(result.d9thc).toBe(0.05);
+    expect(result.confidence).toBeLessThan(1.0);
+  });
+
+  it("should have zero confidence for empty/unparseable text", () => {
+    const result = parseCOAWithRegex(SAMPLE_COA_EMPTY, "B-fallback");
+    expect(result.confidence).toBe(0);
+    expect(result.extractionDetails.strainExtracted).toBe(false);
+    expect(result.extractionDetails.thcaExtracted).toBe(false);
+    expect(result.extractionDetails.d9thcExtracted).toBe(false);
+  });
+
+  it("should use generated batch ID when none found in text", () => {
+    const result = parseCOAWithRegex(SAMPLE_COA_EMPTY, "B-generated-123");
+    expect(result.batchId).toBe("B-generated-123");
+  });
+
+  it("should not extract negative or absurd values", () => {
+    const badText = "THCa: -5.0\nDelta-9-THC: 200";
+    const result = parseCOAWithRegex(badText, "B-test");
+    // -5 and 200 should be rejected (out of 0-100 range)
+    expect(result.thca).toBe(0);
+    expect(result.d9thc).toBe(0);
   });
 });
