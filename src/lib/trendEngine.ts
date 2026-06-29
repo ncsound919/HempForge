@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { adminDb } from "../services/backendServices";
-import ss from "simple-statistics";
+import * as ss from "simple-statistics";
 
 export interface PaperRef {
   id?: string;
