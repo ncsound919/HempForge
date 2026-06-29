@@ -1402,7 +1402,8 @@ Return this EXACTLY as a JSON object matching this schema:
     try {
       const dateKey = new Date().toISOString().slice(0, 10);
       const snapshotId = `snapshot-${tenantId}-${dateKey}`;
-      const snapDoc = await adminDb.collection("trendSnapshots").doc(snapshotId).get();
+      const snapRef = adminDb.collection("trendSnapshots").doc(snapshotId);
+      const snapDoc = await snapRef.get();
 
       if (snapDoc.exists) {
         return res.json(snapDoc.data());
@@ -1412,9 +1413,12 @@ Return this EXACTLY as a JSON object matching this schema:
       const { computeTrendSnapshot } = await import("./src/lib/trendEngine");
       const snapshot = await computeTrendSnapshot(tenantId);
       if (!snapshot) {
-        return res.json({ totalPapers: 0, message: "No data available for trend analysis." });
+        return res.status(500).json({ error: "Failed to compute trend snapshot" });
       }
-      res.json(snapshot);
+
+      const payload = { ...snapshot, id: snapshotId, tenantId };
+      await snapRef.set(payload, { merge: true });
+      return res.json(payload);
     } catch (err: any) {
       console.error("Trend snapshot error:", err);
       res.status(500).json({ error: "Internal server error" });
