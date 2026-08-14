@@ -1,10 +1,9 @@
 import cron from "node-cron";
 import crypto from "crypto";
-import { GoogleGenAI, Type } from "@google/genai";
 import { ingestLiterature, HEMP_QUERY_TERMS, ResearchPaper } from "../lib/literatureService";
 import { computeTrendSnapshot } from "../lib/trendEngine";
 import { adminDb, createAuditHash } from "../services/backendServices";
-import { smartInfer, ollamaHealthCheck } from "../lib/ollamaInference";
+import { classifyDocument, inferWithOllama, ollamaHealthCheck } from "../lib/ollamaInference";
 
 type ProductionClass =
   | "regulatory"
@@ -152,24 +151,41 @@ async function summarizePaperAI(
   abstract: string,
   productionClass: ProductionClass
 ): Promise<string> {
-  const prompt = `Summarize this ${productionClass} hemp research paper in 2-3 sentences for a regulatory compliance digest. Focus on key findings, compounds, and implications.
-
-Title: ${title}
-Abstract: ${abstract}
-
-Return ONLY the summary text.`;
-
+  // Try Ollama if reachable; otherwise deterministic extraction.
   try {
-    const result = await smartInfer(prompt, {
-      format: "text",
-      preferLocal: true,
-      systemPrompt: "You are a concise hemp research summarizer.",
-    });
-    return result.text.trim();
+    const health = await ollamaHealthCheck();
+    if (health.available) {
+      const prompt = `Summarize this ${productionClass} hemp research paper in 2-3 sentences for a regulatory compliance digest. Focus on key findings, compounds, and implications.\n\nTitle: ${title}\nAbstract: ${abstract}\n\nReturn ONLY the summary text.`;
+      const result = await inferWithOllama(prompt, {
+        model: health.model,
+        format: "text",
+        timeout: 10_000,
+        systemPrompt: "You are a concise hemp research summarizer.",
+      });
+      return result.text.trim();
+    }
   } catch (err) {
-    console.warn("[literatureJobs] AI summarization failed, using deterministic fallback:", err);
-    return buildDeterministicSummary(title, productionClass, [], [], []);
+    console.warn("[literatureJobs] Ollama summarization failed, using deterministic fallback:", err);
   }
+  return buildDeterministicSummary(title, productionClass, [], [], []);
+}
+
+async function classifyPaperWithModel(text: string): Promise<ProductionClass> {
+  // Always run the deterministic classifier. Optionally upgrade with Ollama.
+  const deterministic = classifyPaper(text);
+  try {
+    const health = await ollamaHealthCheck();
+    if (health.available) {
+      const cls = await classifyDocument(text);
+      const allowed: ProductionClass[] = ["regulatory", "safety", "formulation", "cultivation", "analytics", "general"];
+      if (allowed.includes(cls.category as ProductionClass) && cls.confidence >= 0.7) {
+        return cls.category as ProductionClass;
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  return deterministic;
 }
 
 function classifyPaper(text: string): ProductionClass {
@@ -267,13 +283,13 @@ function buildCanonicalId(paper: ResearchPaper): string {
   return `paper-${stableHash(basis).slice(0, 20)}`;
 }
 
-function toProductionPaper(
+async function toProductionPaper(
   paper: ResearchPaper,
   query: string,
   tenantId: string,
   runId: string,
   existing?: Partial<ProductionPaper>
-): ProductionPaper {
+): Promise<ProductionPaper> {
   const normalizedTitle = normalizeText(paper.title);
   const normalizedAbstract = normalizeText(paper.abstract);
   const combined = `${normalizedTitle} ${normalizedAbstract}`;
@@ -281,7 +297,7 @@ function toProductionPaper(
   const compoundTags = extractTags(combined, COMPOUND_RULES);
   const regulatoryTags = extractTags(combined, REGULATORY_RULES);
   const studyTags = extractTags(combined, STUDY_RULES);
-  const productionClass = classifyPaper(combined);
+  const productionClass = await classifyPaperWithModel(combined);
   const relevanceScore = computeRelevanceScore(
     normalizedTitle,
     normalizedAbstract,
@@ -483,7 +499,7 @@ export async function runLiteratureProduction(tenantId: string = DEFAULT_TENANT,
         for (const paper of papers) {
           const canonicalId = buildCanonicalId(paper);
           const existing = merged.get(canonicalId);
-          const next = toProductionPaper(paper, term, tenantId, runId, existing);
+          const next = await toProductionPaper(paper, term, tenantId, runId, existing);
           merged.set(canonicalId, existing ? mergeProductionPapers(existing, next) : next);
         }
       } catch (err: any) {

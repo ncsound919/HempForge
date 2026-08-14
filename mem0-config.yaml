@@ -1,0 +1,30 @@
+vector_store:
+  provider: pgvector
+  config:
+    host: postgres
+    port: 5432
+    dbname: mem0
+    user: mem0
+    password: ${PGVECTOR_PASSWORD}
+    embedding_dim: 1536
+
+llm:
+  provider: openai
+  config:
+    model: ${OPENAI_MODEL:-gpt-4o-mini}
+    temperature: 0.2
+
+embedder:
+  provider: openai
+  config:
+    model: ${EMBEDDING_MODEL:-text-embedding-3-small}
+
+graph_store:
+  provider: neo4j
+  config:
+    url: bolt://neo4j:7687
+    username: neo4j
+    password: ${NEO4J_PASSWORD}
+  threshold: 0.7
+
+version: "v1.1"

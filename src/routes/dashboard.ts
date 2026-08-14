@@ -5,7 +5,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { Router, RequestHandler } from "express";
-import { calculateCompliance } from "../lib/complianceEngine";
+import { normalizeCoaForDecisioning } from "../lib/coaNormalizer";
 import {
   createAuditHash,
   getAuditLogs,
@@ -17,20 +17,34 @@ import type { AuditLog } from "../lib/firebaseService";
 import { DEFAULT_TENANT } from "../config";
 
 function computeDashboardSummary(coas: any[]) {
-  const totalBatches = coas.length;
-  const compliant = coas.filter((c) => c.status === "Compliant").length;
-  const atRisk = coas.filter((c) => c.status === "At Risk").length;
-  const nonCompliant = coas.filter((c) => c.status === "Non-Compliant").length;
+  const normalizedCoas = coas.map(c => {
+    return normalizeCoaForDecisioning({
+      batchId: c.batchId,
+      productName: c.strain || c.productName,
+      productType: c.productType || "Flower",
+      labName: c.labName,
+      testDate: c.testDate || c.uploadDate,
+      thca: c.thca !== undefined ? Number(c.thca) : 0,
+      d9thc: c.d9thc !== undefined ? Number(c.d9thc) : 0,
+      cbd: c.cbd !== undefined ? Number(c.cbd) : undefined,
+      moisture: c.moisture !== undefined ? Number(c.moisture) : undefined,
+    });
+  });
+
+  const totalBatches = normalizedCoas.length;
+  const compliant = normalizedCoas.filter((c) => c.status === "compliant").length;
+  const atRisk = normalizedCoas.filter((c) => c.status === "borderline").length;
+  const nonCompliant = normalizedCoas.filter((c) => c.status === "non_compliant").length;
   const complianceRate = totalBatches > 0 ? Math.round((compliant / totalBatches) * 100) : 0;
 
   const averageTotalThc =
     totalBatches > 0
-      ? parseFloat((coas.reduce((sum, c) => sum + Number(c.totalThc || 0), 0) / totalBatches).toFixed(3))
+      ? parseFloat((normalizedCoas.reduce((sum, c) => sum + Number(c.totalThc || 0), 0) / totalBatches).toFixed(3))
       : 0;
 
-  const highestRisk = [...coas].sort((a, b) => Number(b.totalThc || 0) - Number(a.totalThc || 0))[0] || null;
+  const highestRisk = [...normalizedCoas].sort((a, b) => Number(b.totalThc || 0) - Number(a.totalThc || 0))[0] || null;
 
-  const nearThresholdCount = coas.filter((c) => {
+  const nearThresholdCount = normalizedCoas.filter((c) => {
     const total = Number(c.totalThc || 0);
     return total >= 0.25 && total < 0.3;
   }).length;
@@ -114,28 +128,34 @@ export function dashboardRouter(deps: { authMiddleware: RequestHandler }): Route
       const coas = await repo.list();
 
       const evaluated = coas.map((coa: any) => {
-        const complianceResult = calculateCompliance({
-          thca: coa.thca !== undefined ? Number(coa.thca) : undefined,
-          d9thc: coa.d9thc !== undefined ? Number(coa.d9thc) : undefined,
-          totalThc: coa.totalThc ? Number(coa.totalThc) : undefined,
+        const normalized = normalizeCoaForDecisioning({
+          batchId: coa.batchId,
+          productName: coa.strain || coa.productName,
+          productType: coa.productType,
+          labName: coa.labName,
+          testDate: coa.testDate,
+          thca: coa.thca !== undefined ? Number(coa.thca) : 0,
+          d9thc: coa.d9thc !== undefined ? Number(coa.d9thc) : 0,
         });
 
+        const statusMapped = normalized.status === 'compliant' ? 'Compliant' : (normalized.status === 'borderline' ? 'At Risk' : 'Non-Compliant');
+
         const recommendation = coa.recommendation ||
-          (complianceResult.status === "Non-Compliant"
+          (statusMapped === "Non-Compliant"
             ? "Divert batch to remediation or extraction review due to threshold breach."
-            : complianceResult.status === "At Risk"
+            : statusMapped === "At Risk"
               ? "Monitor variance closely; batch is approaching threshold."
               : undefined);
 
         return {
           ...coa,
-          totalThc: complianceResult.calculatedTotal,
-          status: complianceResult.status,
+          totalThc: normalized.totalThc,
+          status: statusMapped,
           recommendation,
           complianceSignature: signCoa({
             ...coa,
-            totalThc: complianceResult.calculatedTotal,
-            status: complianceResult.status,
+            totalThc: normalized.totalThc,
+            status: statusMapped,
             recommendation,
           }),
         };

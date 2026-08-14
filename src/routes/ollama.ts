@@ -1,23 +1,18 @@
 /**
  * routes/ollama.ts
  * ─────────────────────────────────────────────────────────────────────────────
- * Local Ollama inference endpoints. Health check, generic inference, flyer
- * generation, document classification.
- *
- * NOTE: Currently shares the Gemini rate limiter. This is a known limitation
- * — tracked for Phase 5+. Splitting them is straightforward: instantiate a
- * dedicated limiter in backendServices.ts and pass it through.
- * ─────────────────────────────────────────────────────────────────────────────
+ * Local model endpoints. Health check, flyer generation, document
+ * classification. All inference is now deterministic (rule-based) — Ollama
+ * remains as an optional local model server, but is not required for any
+ * feature.
  */
 import { Router, RequestHandler } from "express";
 import {
-  checkGeminiRateLimit,
   saveAuditLog,
   createAuditHash,
 } from "../services/backendServices";
 import {
   ollamaHealthCheck,
-  inferWithOllama,
   classifyDocument,
   generateFlyerContent,
 } from "../lib/ollamaInference";
@@ -33,55 +28,19 @@ export function ollamaRouter(deps: { authMiddleware: RequestHandler }): Router {
       const status = await ollamaHealthCheck();
       res.json(status);
     } catch (err: any) {
-      console.error("test-db error:", err);
+      console.error("ollama health error:", err);
       res.status(500).json({ error: "Internal server error" });
     }
   });
 
   // ─── POST /api/ollama/infer ────────────────────────────────────────────────
   router.post("/infer", deps.authMiddleware, async (req, res) => {
-    const userContext = req.authContext;
-    const userId = userContext?.userId || "unknown-user";
-
-    const rateLimit = checkGeminiRateLimit(userId);
-    if (!rateLimit.allowed) {
-      return res.status(429).json({
-        error: "Too Many Requests",
-        details: `Rate limit exceeded. Please try again after ${new Date(rateLimit.resetTime).toLocaleTimeString()}.`,
-      });
-    }
-
-    const { prompt, model, format, timeout: rawTimeout } = req.body;
-    const timeout = Math.min(Number(rawTimeout) || 15_000, 60_000);
-    if (!prompt || typeof prompt !== "string") {
-      return res.status(400).json({ error: "prompt is required and must be a string" });
-    }
-
-    try {
-      const result = await inferWithOllama(prompt, {
-        model,
-        format: format || "text",
-        timeout: timeout || 15_000,
-      });
-
-      const auditEntry: Omit<AuditLog, "hash"> = {
-        id: `log-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        userId: userContext?.userId || "system-agent",
-        userRole: userContext?.userRole || "Operator",
-        tenantId: userContext?.tenantId || DEFAULT_TENANT,
-        action: "OLLAMA_INFERENCE",
-        details: `Local Ollama inference completed. Model: ${result.model}. Latency: ${result.latencyMs}ms. Provider: ${result.provider}.`,
-        category: "AI_INFERENCE",
-      };
-      const hashedAudit = { ...auditEntry, hash: createAuditHash(auditEntry) };
-      await saveAuditLog(hashedAudit, req.firebaseToken as string);
-
-      res.json(result);
-    } catch (err: any) {
-      console.error("Ollama Inference Error:", err);
-      res.status(500).json({ error: "Internal server error" });
-    }
+    return res.status(410).json({
+      error: "Gone",
+      details:
+        "Cloud/local LLM inference is no longer available. HempForge is fully " +
+        "deterministic. Use /api/autonomy/run to drive the agent pipeline.",
+    });
   });
 
   // ─── POST /api/ollama/flyer ────────────────────────────────────────────────
@@ -100,8 +59,8 @@ export function ollamaRouter(deps: { authMiddleware: RequestHandler }): Router {
         userId: userContext?.userId || "system-agent",
         userRole: userContext?.userRole || "Operator",
         tenantId: userContext?.tenantId || DEFAULT_TENANT,
-        action: "OLLAMA_FLYER_GEN",
-        details: `AI-generated flyer content for paper '${paper.title}'. Headline: "${flyer.headline}"`,
+        action: "DETERMINISTIC_FLYER_GEN",
+        details: `Generated deterministic flyer content for paper '${paper.title}'. Headline: "${flyer.headline}"`,
         category: "AI_INFERENCE",
       };
       const hashedAudit = { ...auditEntry, hash: createAuditHash(auditEntry) };
@@ -116,7 +75,6 @@ export function ollamaRouter(deps: { authMiddleware: RequestHandler }): Router {
 
   // ─── POST /api/ollama/classify ─────────────────────────────────────────────
   router.post("/classify", deps.authMiddleware, async (req, res) => {
-    const userContext = req.authContext;
     const { text } = req.body;
     if (!text || typeof text !== "string") {
       return res.status(400).json({ error: "text is required" });

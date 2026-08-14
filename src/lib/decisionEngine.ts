@@ -10,9 +10,9 @@
  * Tier: 1 (deterministic) — no API keys, no network calls.
  */
 
-import { calculateCompliance, evaluateCOACompliance } from './complianceEngine';
-import { verifyAuditChain } from './auditEngine';
-import { hasPermission, requirePermission } from './permissionsEngine';
+import { calculateCompliance } from './complianceEngine';
+import { verifyAuditChain, type AuditEntry } from './auditEngine';
+import { hasPermission, type Permission } from './permissionsEngine';
 import { classifyOutput } from './provenanceEngine';
 
 // ---------------------------------------------------------------------------
@@ -23,26 +23,11 @@ export type ComplianceStatus = 'compliant' | 'non_compliant' | 'borderline' | 'u
 export type DispositionRecommendation = 'release' | 'hold' | 'reject' | 'retest';
 export type AlertSeverity = 'none' | 'low' | 'medium' | 'high' | 'critical';
 
-/**
- * complianceEngine.calculateCompliance() returns status as
- * 'Compliant' | 'At Risk' | 'Non-Compliant', while this module's
- * ComplianceStatus uses a different literal set. Map between them so
- * comparisons against ComplianceStatus values actually match.
- */
-function toDecisionComplianceStatus(status: string): ComplianceStatus {
-  switch (status) {
-    case 'Compliant': return 'compliant';
-    case 'At Risk': return 'borderline';
-    case 'Non-Compliant': return 'non_compliant';
-    default: return 'unknown';
-  }
-}
-
 export interface BatchReleaseParams {
-  thca: number;          // percentage
-  d9thc: number;         // percentage
-  auditLogs: Array<{ id: string; hash: string; previousHash: string; timestamp: number }>;
-  metrcStatus: string;   // e.g. 'Submitted', 'Approved', 'Rejected'
+  thca: number;
+  d9thc: number;
+  auditLogs: AuditEntry[];
+  metrcStatus: string;
   requiredApprovals: string[];
   completedApprovals: string[];
   productType: string;
@@ -95,7 +80,7 @@ export interface WorkflowTransitionParams {
   fromStage: string;
   toStage: string;
   complianceStatus?: ComplianceStatus;
-  requiredPermission: string;
+  requiredPermission: Permission;
 }
 
 export interface WorkflowTransitionDecision {
@@ -116,32 +101,36 @@ export interface WorkflowTransitionDecision {
 export function decideBatchRelease(params: BatchReleaseParams): BatchReleaseDecision {
   const reasons: string[] = [];
 
-  // Compliance
-  const compliance = calculateCompliance({ thca: params.thca, d9thc: params.d9thc });
-  const complianceStatus = compliance.status as ComplianceStatus;
+  const compliance = calculateCompliance({
+    thca: params.thca,
+    d9thc: params.d9thc,
+  });
+
+  const complianceStatus = toDecisionComplianceStatus(compliance.status);
+
   if (complianceStatus === 'non_compliant') {
     reasons.push(`Non-compliant: D9-THC ${params.d9thc.toFixed(3)}% exceeds 0.3% limit`);
   }
 
-  // Audit chain
   const auditResult = verifyAuditChain(params.auditLogs);
   const auditIntact = auditResult.valid;
+
   if (!auditIntact) {
     reasons.push(`Audit chain broken at entry: ${auditResult.brokenAt ?? 'unknown'}`);
   }
 
-  // Metrc status
   const METRC_APPROVED_STATES = ['Submitted', 'Approved', 'Active'];
   const metrcApproved = METRC_APPROVED_STATES.includes(params.metrcStatus);
+
   if (!metrcApproved) {
     reasons.push(`Metrc status "${params.metrcStatus}" is not an approved release state`);
   }
 
-  // Required approvals
   const missing = params.requiredApprovals.filter(
     (a) => !params.completedApprovals.includes(a)
   );
   const approvalsComplete = missing.length === 0;
+
   if (!approvalsComplete) {
     reasons.push(`Missing approvals: ${missing.join(', ')}`);
   }
@@ -159,7 +148,7 @@ export function decideBatchRelease(params: BatchReleaseParams): BatchReleaseDeci
     auditIntact,
     metrcApproved,
     approvalsComplete,
-    outputClassification: classifyOutput('deterministic', 'decisionEngine.decideBatchRelease'),
+    outputClassification: classifyOutput('deterministic'),
   };
 }
 
@@ -217,7 +206,7 @@ export function decideCOAAlert(params: COAAlertParams): COAAlertDecision {
     shouldAlert: severity !== 'none',
     severity,
     reasons,
-    outputClassification: classifyOutput('deterministic', 'decisionEngine.decideCOAAlert'),
+    outputClassification: classifyOutput('deterministic'),
   };
 }
 
@@ -266,7 +255,7 @@ export function recommendDisposition(params: DispositionParams): DispositionDeci
   return {
     recommendation,
     rationale,
-    outputClassification: classifyOutput('deterministic', 'decisionEngine.recommendDisposition'),
+    outputClassification: classifyOutput('deterministic'),
   };
 }
 
@@ -329,13 +318,24 @@ export function validateWorkflowTransition(
   return {
     permitted: reasons.length === 0,
     reasons,
-    outputClassification: classifyOutput('deterministic', 'decisionEngine.validateWorkflowTransition'),
+    outputClassification: classifyOutput('deterministic'),
   };
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function toDecisionComplianceStatus(status: 'Compliant' | 'At Risk' | 'Non-Compliant'): ComplianceStatus {
+  switch (status) {
+    case 'Compliant':
+      return 'compliant';
+    case 'At Risk':
+      return 'borderline';
+    case 'Non-Compliant':
+      return 'non_compliant';
+  }
+}
 
 const SEVERITY_ORDER: AlertSeverity[] = ['none', 'low', 'medium', 'high', 'critical'];
 

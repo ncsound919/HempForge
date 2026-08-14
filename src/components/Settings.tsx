@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { ShieldAlert, Database, Scale, Sliders, Cpu, CheckCircle, AlertTriangle, RefreshCw } from 'lucide-react';
+import Billing from './Billing';
 import { getOllamaConfig, setOllamaConfig, detectLocalModels, OllamaConfig, OllamaModel } from '../lib/ollamaService';
 
 export default function Settings() {
@@ -62,6 +63,10 @@ export default function Settings() {
         <h2 className="text-3xl font-display font-bold text-white tracking-tight italic">Configuration</h2>
         <p className="text-white/40 font-mono text-xs uppercase tracking-widest mt-2">Manage rulesets, thresholds, and swarm parameters.</p>
       </header>
+
+      <div className="mb-8">
+        <Billing />
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <SettingSection 

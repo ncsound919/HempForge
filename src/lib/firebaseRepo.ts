@@ -72,12 +72,27 @@ export class TenantRepository<T extends TenantScopedRecord> {
   }
 
   /**
+   * Alias for save — upserts a record by ID.
+   */
+  async upsert(id: string, data: Omit<T, "tenantId" | "id">): Promise<T> {
+    return this.save({ ...data, id } as Omit<T, "tenantId"> & { id: string });
+  }
+
+  /**
    * Delete a record. Silently no-ops if the doc belongs to another tenant
    * (we don't leak existence across tenants).
    */
   async delete(id: string): Promise<boolean> {
     const existing = await this.get(id);
     if (!existing) return false;
+    // Supabase-backed store
+    const { supabaseDeleteDoc, USE_SUPABASE } = await import(
+      "./supabaseClient"
+    );
+    if (USE_SUPABASE) {
+      await supabaseDeleteDoc(this.collectionName, id, this.tenantId);
+      return true;
+    }
     if (adminDb && adminDb !== localDb) {
       await adminDb.collection(this.collectionName).doc(id).delete();
     } else {

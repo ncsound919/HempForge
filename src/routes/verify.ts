@@ -12,7 +12,12 @@
  */
 import { Router, RequestHandler, Request, Response } from "express";
 import { param } from "express-validator";
-import { adminDb, signCoa } from "../services/backendServices";
+import { adminDb, signCoa, createRateLimiter } from "../services/backendServices";
+
+// Public surface hardening: the COA verification endpoint is unauthenticated
+// (anyone with the COA id can check a certificate). Bound it per-IP so a
+// single client cannot hammer the ledger.
+const verifyRateLimiter = createRateLimiter("coa-verify-public", 60, 60 * 1000);
 
 export function verifyRouter(): Router {
   const router = Router();
@@ -21,6 +26,14 @@ export function verifyRouter(): Router {
     "/verify/:id",
     [param("id").isString().trim().notEmpty().escape()],
     async (req: Request, res: Response) => {
+      const limit = verifyRateLimiter.check(req.ip || "unknown");
+      res.set("RateLimit-Limit", "60");
+      res.set("RateLimit-Remaining", String(limit.remaining));
+      res.set("RateLimit-Reset", String(Math.ceil((limit.resetTime - Date.now()) / 1000)));
+      if (!limit.allowed) {
+        return res.status(429).json({ error: "Too many verification requests — slow down." });
+      }
+
       res.set("Cache-Control", "no-store");
       const { id } = req.params;
 

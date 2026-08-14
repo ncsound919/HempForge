@@ -1,9 +1,10 @@
 {
-  "apiKey": "",
-  "authDomain": "",
-  "projectId": "",
-  "storageBucket": "",
-  "messagingSenderId": "",
-  "appId": "",
-  "firestoreDatabaseId": ""
+  "apiKey": "AIzaSyAasxDAXrXCh5lZt3t5pX7XJrbO3DumqeY",
+  "authDomain": "hempforge.firebaseapp.com",
+  "projectId": "hempforge",
+  "storageBucket": "hempforge.firebasestorage.app",
+  "messagingSenderId": "995422587614",
+  "appId": "1:995422587614:web:42a0b47eebeef0c79f104f",
+  "measurementId": "G-YJJE0G7B5V",
+  "firestoreDatabaseId": "ai-studio-hempforge-d708b592-7e59-4bb6-8338-12f338f12f7e"
 }

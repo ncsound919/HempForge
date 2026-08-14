@@ -80,3 +80,59 @@ export function calculateDecarbKinetics(params: { thca: number, d9thc: number, t
     }
   };
 }
+
+export interface BatchRiskScore {
+  score: number;        // 0-100 risk score
+  level: 'low' | 'medium' | 'high' | 'critical';
+  factors: string[];    // contributing factors
+}
+
+export function scoreBatchRisk(batch: { thca?: number; d9thc?: number; totalThc?: number; productType?: string; status?: string }): BatchRiskScore {
+  const compliance = calculateCompliance({
+    thca: batch.thca,
+    d9thc: batch.d9thc,
+    totalThc: batch.totalThc,
+    productType: batch.productType,
+  });
+
+  const factors: string[] = [];
+  let score = 0;
+
+  // Base score from total THC
+  if (compliance.calculatedTotal > 0.3) {
+    score += 50;
+    factors.push('Total THC exceeds 0.3% limit');
+  } else if (compliance.calculatedTotal >= 0.25) {
+    score += 25;
+    factors.push('Total THC in at-risk range (0.25-0.3%)');
+  }
+
+  // Product type factor
+  if (batch.productType === 'Infused-Edible') {
+    score += 10;
+    factors.push('Infused edible product type');
+  }
+
+  // Existing status factor
+  if (batch.status === 'Non-Compliant') {
+    score += 30;
+    factors.push('Previously flagged non-compliant');
+  } else if (batch.status === 'At Risk') {
+    score += 15;
+    factors.push('Previously flagged at-risk');
+  }
+
+  // Alerts factor
+  score += compliance.alerts.length * 5;
+
+  // Cap score at 100
+  score = Math.min(100, score);
+
+  let level: BatchRiskScore['level'];
+  if (score >= 70) level = 'critical';
+  else if (score >= 40) level = 'high';
+  else if (score >= 20) level = 'medium';
+  else level = 'low';
+
+  return { score, level, factors };
+}

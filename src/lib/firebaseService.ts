@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { getApps, initializeApp, applicationDefault, cert } from "firebase-admin/app";
 import { getFirestore as getAdminFirestore, Firestore } from "firebase-admin/firestore";
 import fs from "fs";
@@ -66,11 +67,29 @@ function getAdminAppSafe() {
 
 export class LocalFirestoreDB {
   private filePath = path.join(process.cwd(), "local-db-fallback.json");
+  private tmpPath = this.filePath + ".tmp";
+  // In-process mutex: serialize every read-modify-write cycle that goes
+  // through this DB so concurrent cycles / cron jobs cannot interleave.
+  private writeQueue: Promise<unknown> = Promise.resolve();
+
+  // Read cache: the fallback DB is a single large JSON file (tens of MB).
+  // Parsing it on EVERY request was the benchmark P99 killer (5s+ reads).
+  // Cache the parsed snapshot and invalidate on any write; a short TTL also
+  // bounds staleness for external writers. This is a dev/demo fallback — real
+  // Firestore deployments never touch this path.
+  private readCache: { data: JsonMap; at: number } | null = null;
+  private static readonly READ_CACHE_TTL_MS = 2000;
 
   readData(): JsonMap {
+    const now = Date.now();
+    if (this.readCache && now - this.readCache.at < LocalFirestoreDB.READ_CACHE_TTL_MS) {
+      return this.readCache.data;
+    }
     try {
       if (fs.existsSync(this.filePath)) {
-        return JSON.parse(fs.readFileSync(this.filePath, "utf8"));
+        const data = JSON.parse(fs.readFileSync(this.filePath, "utf8")) as JsonMap;
+        this.readCache = { data, at: now };
+        return data;
       }
     } catch (err) {
       console.error("Local DB read failed:", err);
@@ -78,9 +97,54 @@ export class LocalFirestoreDB {
     return {};
   }
 
+  private invalidateReadCache(): void {
+    this.readCache = null;
+  }
+
+  /**
+   * Atomically write the full data snapshot. Writes go to a temp file then
+   * rename, so a process crash mid-write never leaves a half-written file.
+   * Wrapped in an in-process queue so concurrent callers see consistent
+   * read-modify-write semantics on the same snapshot. On Windows, EPERM
+   * on rename can happen transiently because the target file is briefly
+   * held open by antivirus or the indexer; we retry with backoff.
+   */
+  async writeDataAsync(data: JsonMap): Promise<void> {
+    const next = this.writeQueue.then(() => new Promise<void>((resolve, reject) => {
+      let attempt = 0;
+      const maxAttempts = 5;
+      const tryWrite = () => {
+        attempt++;
+        try {
+          fs.writeFileSync(this.tmpPath, JSON.stringify(data, null, 2), "utf8");
+          fs.renameSync(this.tmpPath, this.filePath);
+          this.invalidateReadCache();
+          resolve();
+        } catch (err: any) {
+          const isEperm = err && (err.code === "EPERM" || err.code === "EBUSY");
+          if (isEperm && attempt < maxAttempts) {
+            // Backoff: 50ms, 100ms, 200ms, 400ms
+            const delay = 50 * Math.pow(2, attempt - 1);
+            setTimeout(tryWrite, delay);
+          } else {
+            console.error("Local DB write failed:", err);
+            try { if (fs.existsSync(this.tmpPath)) fs.unlinkSync(this.tmpPath); } catch { /* ignore */ }
+            reject(err);
+          }
+        }
+      };
+      tryWrite();
+    }));
+    this.writeQueue = next.catch(() => undefined);
+    await next;
+  }
+
+  /** Synchronous fallback. Kept for backwards-compat callers; prefer writeDataAsync. */
   writeData(data: JsonMap) {
     try {
-      fs.writeFileSync(this.filePath, JSON.stringify(data, null, 2), "utf8");
+      fs.writeFileSync(this.tmpPath, JSON.stringify(data, null, 2), "utf8");
+      fs.renameSync(this.tmpPath, this.filePath);
+      this.invalidateReadCache();
     } catch (err) {
       console.error("Local DB write failed:", err);
     }
@@ -97,11 +161,21 @@ export class LocalFirestoreDB {
   }
 
   async setDoc(collection: string, docId: string, value: any, merge = true): Promise<void> {
+    await this.writeQueue;
     const data = this.readData();
     if (!data[collection]) data[collection] = {};
     const current = data[collection][docId] || {};
     data[collection][docId] = merge ? { ...current, ...value } : value;
-    this.writeData(data);
+    await this.writeDataAsync(data);
+  }
+
+  async deleteDoc(collection: string, docId: string): Promise<void> {
+    await this.writeQueue;
+    const data = this.readData();
+    if (data[collection] && data[collection][docId]) {
+      delete data[collection][docId];
+      await this.writeDataAsync(data);
+    }
   }
 }
 
@@ -231,7 +305,15 @@ class LocalDoc {
     } else {
       data[this.collectionName][this.docId] = docData;
     }
-    this.db.writeData(data);
+    await this.db.writeDataAsync(data);
+  }
+
+  async delete() {
+    const data = this.db.readData();
+    if (data[this.collectionName] && data[this.collectionName][this.docId]) {
+      delete data[this.collectionName][this.docId];
+      await this.db.writeDataAsync(data);
+    }
   }
 }
 
@@ -318,6 +400,14 @@ export async function fetchFromFirestore(
   collectionPath: string,
   _authToken: string
 ): Promise<any[]> {
+  // Supabase-backed store (production). Tenant scoping happens in callers.
+  const { supabaseFetchCollection, USE_SUPABASE } = await import(
+    "./supabaseClient"
+  );
+  if (USE_SUPABASE) {
+    return supabaseFetchCollection(collectionPath);
+  }
+
   if (adminDb && adminDb !== localDb) {
     try {
       const snapshot = await adminDb.collection(collectionPath).get();
@@ -339,6 +429,13 @@ export async function writeToFirestore(
   data: any,
   _authToken: string
 ): Promise<void> {
+  // Supabase-backed store (production). The record's tenantId drives scoping.
+  const { supabaseSetDoc, USE_SUPABASE } = await import("./supabaseClient");
+  if (USE_SUPABASE) {
+    const tenantId = data?.tenantId || "Global-Hemp-Wilson";
+    return supabaseSetDoc(collectionPath, docId, data, tenantId);
+  }
+
   if (adminDb && adminDb !== localDb) {
     try {
       await adminDb.collection(collectionPath).doc(docId).set(data, { merge: true });

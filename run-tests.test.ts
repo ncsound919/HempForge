@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   createAuditHash,
   signCoa,
-  checkGeminiRateLimit,
+  createRateLimiter,
   checkLitRateLimit,
   isValidGeminiKey,
   deriveTenantAndRole
@@ -26,7 +26,8 @@ import {
   createSimulatedProvenance,
   createFormulaProvenance,
   createHeuristicProvenance,
-  labelDemoData,
+  createDeterministicProvenance,
+  classifyOutput,
 } from "./src/lib/provenanceEngine";
 
 import {
@@ -152,22 +153,22 @@ describe("3. Multi-Tenant Role & Scope Derivation Engine", () => {
   });
 });
 
-describe("4. Gemini API Key Structural Validator", () => {
-  it("should fail validation for empty or unconfigured placeholders", () => {
+describe("4. Gemini API Key Structural Validator (deprecated after deterministic refactor)", () => {
+  it("should reject all keys — Gemini is no longer supported", () => {
     expect(isValidGeminiKey(undefined)).toBe(false);
     expect(isValidGeminiKey("")).toBe(false);
     expect(isValidGeminiKey("MY_GEMINI_API_KEY")).toBe(false);
-  });
-
-  it("should pass validation for structurally valid Gemini key signatures", () => {
-    expect(isValidGeminiKey("AIzaSyD_some-secret-key-signature-here-12345")).toBe(true);
+    expect(isValidGeminiKey("AIzaSyD_some-secret-key-signature-here-12345")).toBe(false);
   });
 });
 
 describe("5. Deterministic API Rate Limiter (Mocked Timers)", () => {
+  let limiter: ReturnType<typeof createRateLimiter>;
+
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-06-29T12:00:00Z"));
+    limiter = createRateLimiter("test-ai-limiter", 10, 60 * 1000);
   });
 
   afterEach(() => {
@@ -179,7 +180,7 @@ describe("5. Deterministic API Rate Limiter (Mocked Timers)", () => {
     let allowedCount = 0;
 
     for (let i = 0; i < 10; i++) {
-      const res = checkGeminiRateLimit(uid);
+      const res = limiter.check(uid);
       if (res.allowed) allowedCount++;
     }
 
@@ -190,10 +191,10 @@ describe("5. Deterministic API Rate Limiter (Mocked Timers)", () => {
     const uid = "auditor-test-uid";
 
     for (let i = 0; i < 10; i++) {
-      checkGeminiRateLimit(uid);
+      limiter.check(uid);
     }
 
-    const res = checkGeminiRateLimit(uid);
+    const res = limiter.check(uid);
     expect(res.allowed).toBe(false);
     expect(res.remaining).toBe(0);
   });
@@ -202,13 +203,13 @@ describe("5. Deterministic API Rate Limiter (Mocked Timers)", () => {
     const uid = "auditor-test-uid";
 
     for (let i = 0; i < 11; i++) {
-      checkGeminiRateLimit(uid);
+      limiter.check(uid);
     }
 
     // Advance 61 seconds (Window is 60s)
     vi.advanceTimersByTime(61 * 1000);
 
-    const res = checkGeminiRateLimit(uid);
+    const res = limiter.check(uid);
     expect(res.allowed).toBe(true);
     expect(res.remaining).toBe(9);
   });
@@ -352,7 +353,7 @@ describe("8. Live Integration Endpoints Checks", () => {
 // ─── NEW AUDIT CRITERIA TESTS ─────────────────────────────────────────────────
 
 describe("9. Provenance & Truth Labeling (Criterion 1, 2, 3, 8)", () => {
-  it("should create live AI provenance with correct classification", () => {
+  it("should create live AI provenance as heuristic after Gemini removal", () => {
     const envelope = createLiveAIProvenance(
       { text: "Sample response", agentType: "Chemistry" },
       {
@@ -365,32 +366,29 @@ describe("9. Provenance & Truth Labeling (Criterion 1, 2, 3, 8)", () => {
       }
     );
 
-    expect(envelope.outputClassification).toBe("live-ai-inference");
-    expect(envelope.scientificClassification).toBe("ai-generated-inference");
+    expect(envelope.outputClassification).toBe("heuristic");
+    expect(envelope.scientificClassification).toBe("heuristic-keyword");
     expect(envelope.provenance.source.identity).toBe("gemini-2.5-flash");
-    expect(envelope.provenance.verificationStatus).toBe("ai-generated");
+    expect(envelope.provenance.verificationStatus).toBe("unverified");
     expect(envelope.disclaimers.length).toBeGreaterThan(0);
     expect(envelope.provenance.triggeredBy.tenantId).toBe("Tenant-A");
   });
 
-  it("should create simulated provenance with clear warnings", () => {
+  it("should create simulated provenance as deterministic after Gemini removal", () => {
     const envelope = createSimulatedProvenance(
       { text: "Fallback content" },
       {
-        reason: "GEMINI_API_KEY not configured",
         fallbackMethod: "keyword-matching",
-        inputs: { message: "test" },
         userId: "user-1",
         userRole: "Operator",
         tenantId: "Tenant-A",
       }
     );
 
-    expect(envelope.outputClassification).toBe("simulated");
-    expect(envelope.scientificClassification).toBe("speculative-hypothesis");
-    expect(envelope.provenance.verificationStatus).toBe("simulated");
-    expect(envelope.disclaimers.some(d => d.includes("SIMULATED"))).toBe(true);
-    expect(envelope.disclaimers.some(d => d.includes("MUST NOT"))).toBe(true);
+    expect(envelope.outputClassification).toBe("deterministic");
+    expect(envelope.scientificClassification).toBe("deterministic-rule");
+    expect(envelope.provenance.verificationStatus).toBe("verified");
+    expect(envelope.confidence).toBe(1.0);
   });
 
   it("should create formula provenance with verified status", () => {
@@ -398,15 +396,14 @@ describe("9. Provenance & Truth Labeling (Criterion 1, 2, 3, 8)", () => {
       { totalThc: 0.286, status: "At Risk" },
       {
         formula: "Total THC = (THCa × 0.877) + Δ9-THC",
-        inputs: { thca: 0.28, d9thc: 0.04 },
         userId: "user-1",
         userRole: "Lab Admin",
         tenantId: "Tenant-A",
       }
     );
 
-    expect(envelope.outputClassification).toBe("deterministic-formula");
-    expect(envelope.scientificClassification).toBe("deterministic-formula");
+    expect(envelope.outputClassification).toBe("deterministic");
+    expect(envelope.scientificClassification).toBe("deterministic-rule");
     expect(envelope.provenance.verificationStatus).toBe("verified");
   });
 
@@ -415,36 +412,48 @@ describe("9. Provenance & Truth Labeling (Criterion 1, 2, 3, 8)", () => {
       { text: "Pattern matched response" },
       {
         method: "keyword-signal-scoring",
-        inputs: { query: "decarb temp" },
+        confidence: 0.6,
         userId: "user-1",
         userRole: "Operator",
         tenantId: "Tenant-A",
       }
     );
 
-    expect(envelope.outputClassification).toBe("heuristic-fallback");
+    expect(envelope.outputClassification).toBe("heuristic");
+    expect(envelope.scientificClassification).toBe("heuristic-keyword");
     expect(envelope.provenance.verificationStatus).toBe("unverified");
   });
 
-  it("should label demo data with demo-only classification", () => {
-    const envelope = labelDemoData(
-      { productName: "Test Product", batchNumber: "BATCH-99" },
-      "local-db-fallback.json seed data"
+  it("should classify deterministic outputs via classifyOutput", () => {
+    expect(classifyOutput("deterministic")).toBe("deterministic");
+    expect(classifyOutput("heuristic")).toBe("heuristic");
+    expect(classifyOutput("local-model")).toBe("local-model");
+    expect(classifyOutput("anything-else")).toBe("rejected");
+  });
+
+  it("should create deterministic provenance with verified status", () => {
+    const envelope = createDeterministicProvenance(
+      { rule: "NC total THC ≤ 0.3%" },
+      {
+        method: "compliance-threshold",
+        userId: "user-1",
+        userRole: "Lab Admin",
+        tenantId: "Tenant-A",
+      }
     );
 
-    expect(envelope.outputClassification).toBe("demo-only");
-    expect(envelope.provenance.verificationStatus).toBe("simulated");
-    expect(envelope.disclaimers.some(d => d.includes("DEMO DATA"))).toBe(true);
+    expect(envelope.outputClassification).toBe("deterministic");
+    expect(envelope.provenance.verificationStatus).toBe("verified");
+    expect(envelope.confidence).toBe(1.0);
   });
 
   it("should preserve provenance timestamp and triggeredBy context", () => {
     const before = new Date().toISOString();
-    const envelope = createLiveAIProvenance(
+    const envelope = createHeuristicProvenance(
       { result: "test" },
       {
-        model: "test-model",
-        inputs: {},
-        steps: [],
+        method: "test-model",
+        confidence: 0.5,
         userId: "user-42",
         userRole: "Quality Auditor",
         tenantId: "Tenant-X",
@@ -701,30 +710,25 @@ describe("13. Scientific Validity Classification (Criterion 8)", () => {
   it("should distinguish formula provenance from AI provenance", () => {
     const formulaEnv = createFormulaProvenance({ result: 0.286 }, {
       formula: "THCa * 0.877 + D9",
-      inputs: { thca: 0.28, d9thc: 0.04 },
       userId: "u1", userRole: "Lab Admin", tenantId: "T1",
     });
     const aiEnv = createLiveAIProvenance({ result: "AI text" }, {
       model: "gemini-2.5-flash",
-      inputs: { prompt: "test" },
-      steps: ["inference"],
       userId: "u1", userRole: "Lab Admin", tenantId: "T1",
     });
 
-    expect(formulaEnv.scientificClassification).toBe("deterministic-formula");
-    expect(aiEnv.scientificClassification).toBe("ai-generated-inference");
+    expect(formulaEnv.scientificClassification).toBe("deterministic-rule");
+    expect(aiEnv.scientificClassification).toBe("heuristic-keyword");
     expect(formulaEnv.provenance.verificationStatus).toBe("verified");
-    expect(aiEnv.provenance.verificationStatus).toBe("ai-generated");
+    expect(aiEnv.provenance.verificationStatus).toBe("unverified");
   });
 
-  it("should classify simulated outputs as speculative hypothesis", () => {
+  it("should classify simulated outputs as deterministic after Gemini removal", () => {
     const simEnv = createSimulatedProvenance({ content: "fake" }, {
-      reason: "no API key",
       fallbackMethod: "template",
-      inputs: {},
       userId: "u1", userRole: "Lab Admin", tenantId: "T1",
     });
-    expect(simEnv.scientificClassification).toBe("speculative-hypothesis");
+    expect(simEnv.scientificClassification).toBe("deterministic-rule");
   });
 });
 
@@ -747,12 +751,12 @@ describe("14. Legacy Audit Hash Backward Compatibility", () => {
 });
 
 describe("15. Failure Honesty - Missing Dependency Handling (Criterion 10)", () => {
-  it("should correctly validate Gemini key format", () => {
+  it("should reject all Gemini keys — Gemini removed in deterministic refactor", () => {
     expect(isValidGeminiKey(undefined)).toBe(false);
     expect(isValidGeminiKey("")).toBe(false);
     expect(isValidGeminiKey("MY_GEMINI_API_KEY")).toBe(false);
     expect(isValidGeminiKey("short")).toBe(false);
-    expect(isValidGeminiKey("AIzaSyD_real-key-format-12345")).toBe(true);
+    expect(isValidGeminiKey("AIzaSyD_real-key-format-12345")).toBe(false);
   });
 
   it("should not silently accept placeholder keys", () => {

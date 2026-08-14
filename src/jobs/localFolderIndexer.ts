@@ -410,8 +410,15 @@ export async function runLocalFolderIndexing(config: Partial<LocalFolderIndexCon
       filePath: "SYSTEM",
       message: err?.message || "Unhandled local indexing failure",
     });
-    await adminDb.collection("localResearchRuns").doc(runId).set(run, { merge: true });
-    throw err;
+    try {
+      await adminDb.collection("localResearchRuns").doc(runId).set(run, { merge: true });
+    } catch {
+      // Best-effort logging — if adminDb is unreachable we cannot persist the run.
+    }
+    // Swallow the error: the indexer is a background cron. Failing it should
+    // not crash the whole process when Firebase credentials are unavailable
+    // (the dev fallback writes to local-db-fallback.json and is best-effort).
+    console.error("[localFolderIndexer] Local folder indexing failed:", err);
   } finally {
     runLock = false;
   }

@@ -26,6 +26,15 @@ const HEMP_QUERY_TERMS = [
   'hemp terpene profile', 'cannabinoid formulation stability'
 ];
 
+export const HEMP_QUERY_TERMS_FRONTIER = [
+  'THCV pharmacology', 'CBG cannabinoid', 'CBN sleep efficacy',
+  'minor cannabinoid bioavailability', 'cannabidivarin CBDV',
+  'hemp bast fiber tensile', 'hemp hurd composite', 'industrial hemp decortication',
+  'hemp cover crop', 'hemp soil carbon sequestration', 'hemp rotation weed suppression',
+  'organic hemp production', 'hemp biological pest control',
+  'hemp bud rot detection sensor', 'pollen count hemp field', 'spectral imaging cannabis',
+];
+
 // Deduplication constants
 const TITLE_DEDUP_KEY_LENGTH = 80; // Truncate normalized titles for dedup key generation
 const DEFAULT_API_RATE_LIMIT_MS = 200; // Minimum inter-request delay per source to avoid API throttling

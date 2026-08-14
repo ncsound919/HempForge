@@ -1,0 +1,100 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# HempForge — deploy manifest
+#
+# Two modes:
+#   DEMO (no credentials — local-DB fallback + dev tokens):
+#     docker compose --profile demo up -d
+#     Login token: Bearer dev-admin:admin@hempforge.lan:Global-Hemp-Wilson:Lab%20Admin
+#
+#   PRODUCTION (Supabase data + auth, Stripe billing):
+#     cp .env.example .env          # fill SUPABASE_URL + SERVICE_ROLE_KEY,
+#                                   # STRIPE_SECRET_KEY + STRIPE_PRICE_*_ID,
+#                                   # COA_SIGNING_SECRET (>=32 chars), CORS_ORIGIN
+#     docker compose up -d
+#
+# Optional sidecar: local Ollama for on-prem inference (feature flag only).
+#   docker compose --profile ollama up -d
+# ─────────────────────────────────────────────────────────────────────────────
+name: hempforge
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hempforge:latest
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Demo mode: development semantics (dev-token auth + local-DB fallback)
+      # are only honored when NODE_ENV != production.
+      NODE_ENV: "${NODE_ENV:-${DEMO_MODE:+development}}"
+      # Demo containers serve the prebuilt SPA (dist/) instead of running a
+      # Vite dev server, which would need a writable dep cache + full source.
+      SERVE_STATIC: "${DEMO_MODE:-false}"
+      PORT: "3000"
+      # Demo mode: relax startup validation and boot against the on-disk
+      # local DB so the platform runs with zero external credentials.
+      USE_LOCAL_DB_FALLBACK: "${DEMO_MODE:-false}"
+      FIREBASE_PROJECT_ID: "${FIREBASE_PROJECT_ID:-}"
+      COA_SIGNING_SECRET: "${COA_SIGNING_SECRET:-${DEMO_COA_SIGNING_SECRET:-}}"
+      CORS_ORIGIN: "${CORS_ORIGIN:-http://localhost:3000}"
+      ADMIN_EMAIL: "${ADMIN_EMAIL:-admin@hempforge.lan}"
+      APP_URL: "${APP_URL:-http://localhost:3000}"
+      # Supabase (production data + auth). Presence switches the server to the
+      # Supabase store + JWT validation.
+      SUPABASE_URL: "${SUPABASE_URL:-}"
+      SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:-}"
+      SUPABASE_ANON_KEY: "${SUPABASE_ANON_KEY:-}"
+      # Stripe billing
+      STRIPE_SECRET_KEY: "${STRIPE_SECRET_KEY:-}"
+      STRIPE_WEBHOOK_SECRET: "${STRIPE_WEBHOOK_SECRET:-}"
+      STRIPE_PRICE_PILOT_ID: "${STRIPE_PRICE_PILOT_ID:-}"
+      STRIPE_PRICE_STANDARD_ID: "${STRIPE_PRICE_STANDARD_ID:-}"
+      STRIPE_PRICE_ENTERPRISE_ID: "${STRIPE_PRICE_ENTERPRISE_ID:-}"
+      MEM0_API_URL: "${MEM0_API_URL:-http://mem0:8888}"
+      RESEARCHCLAW_URL: "${RESEARCHCLAW_URL:-http://researchclaw:8080}"
+      METRC_API_KEY: "${METRC_API_KEY:-}"
+      OLLAMA_HOST: "${OLLAMA_HOST:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      AUTONOMY_SHORT_CYCLE_MIN: "${AUTONOMY_SHORT_CYCLE_MIN:-5}"
+      AUTONOMY_FULL_CYCLE_MIN: "${AUTONOMY_FULL_CYCLE_MIN:-60}"
+    volumes:
+      - hempforge-data:/app/data
+      - ./local-research:/app/local-research
+      - ./vault:/app/vault
+    profiles: ["default", "demo", "production"]
+    restart: unless-stopped
+
+  # ─── Demo auth bootstrap ───────────────────────────────────────────────────
+  # In DEMO_MODE the app runs with NODE_ENV=development semantics only when
+  # explicitly set; this sidecar is informational — see docs/DEPLOY.md for the
+  # exact dev-token format used by the tests/demo flow.
+  # (No container needed; tokens are passed in the Authorization header.)
+
+  # ─── Optional local LLM (on-prem inference) ────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    profiles: ["ollama"]
+    restart: unless-stopped
+
+  # ─── Optional mem0 memory sidecar (matches docker-compose.mem0.yml intent) ─
+  mem0:
+    image: mem0ai/mem0:latest
+    ports:
+      - "8888:8888"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    profiles: ["mem0"]
+    restart: unless-stopped
+
+volumes:
+  hempforge-data:
+  ollama-data:

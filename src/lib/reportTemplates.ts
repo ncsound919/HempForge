@@ -10,6 +10,7 @@
  */
 
 import { calculateCompliance, evaluateCOACompliance } from './complianceEngine';
+import { normalizeCoaForDecisioning, type COAInput } from './coaNormalizer';
 import { classifyOutput } from './provenanceEngine';
 
 // ---------------------------------------------------------------------------
@@ -44,46 +45,28 @@ export interface ReportSection {
   data: unknown;
 }
 
-// ---------------------------------------------------------------------------
-// 1. COA Summary Report
-// ---------------------------------------------------------------------------
-
-export interface COASummaryParams {
+// Re-exporting COASummaryParams for consistency, as normalizeCoaForDecisioning expects it
+export type COASummaryParams = {
   tenantId: string;
   generatedBy: string;
-  coa: {
-    batchId: string;
-    productName: string;
-    productType: string;
-    labName: string;
-    testDate: string;
-    thca: number;
-    d9thc: number;
-    cbd?: number;
-    moisture?: number;
-    pesticides?: 'pass' | 'fail' | 'not_tested';
-    heavyMetals?: 'pass' | 'fail' | 'not_tested';
-    microbials?: 'pass' | 'fail' | 'not_tested';
-  };
+  coa: COAInput; // Use the COAInput type from coaNormalizer
   auditChainValid: boolean;
   metrcStatus: string;
-}
+};
 
 export function buildCOASummaryReport(params: COASummaryParams): ReportDocument {
-  const { coa } = params;
-  const compliance = calculateCompliance({ thca: coa.thca, d9thc: coa.d9thc });
-  const coaEval = evaluateCOACompliance(coa);
+  const normalizedCoa = normalizeCoaForDecisioning(params.coa);
 
   const sections: ReportSection[] = [
     {
       title: 'Batch Identity',
       type: 'metric_grid',
       data: {
-        'Batch ID': coa.batchId,
-        'Product Name': coa.productName,
-        'Product Type': coa.productType,
-        'Lab Name': coa.labName,
-        'Test Date': coa.testDate,
+        'Batch ID': normalizedCoa.batchId,
+        'Product Name': normalizedCoa.strain, // Use strain from normalized COA
+        'Product Type': params.coa.productType,
+        'Lab Name': params.coa.labName,
+        'Test Date': params.coa.testDate,
         'Metrc Status': params.metrcStatus,
       },
     },
@@ -91,27 +74,23 @@ export function buildCOASummaryReport(params: COASummaryParams): ReportDocument 
       title: 'Cannabinoid Profile',
       type: 'table',
       data: [
-        { analyte: 'THCA', result: `${coa.thca.toFixed(3)}%`, limit: '—', status: 'informational' },
-        { analyte: 'D9-THC', result: `${coa.d9thc.toFixed(3)}%`, limit: '≤ 0.3%', status: compliance.status },
-        { analyte: 'Total THC (post-decarb)', result: `${compliance.totalThc.toFixed(3)}%`, limit: '≤ 0.3%', status: compliance.status },
-        ...(coa.cbd !== undefined ? [{ analyte: 'CBD', result: `${coa.cbd.toFixed(3)}%`, limit: '—', status: 'informational' }] : []),
-        ...(coa.moisture !== undefined ? [{ analyte: 'Moisture', result: `${coa.moisture.toFixed(2)}%`, limit: '≤ 15%', status: coa.moisture <= 15 ? 'pass' : 'fail' }] : []),
+        { analyte: 'THCA', result: `${normalizedCoa.thca.toFixed(3)}%`, limit: '—', status: 'informational' },
+        { analyte: 'D9-THC', result: `${normalizedCoa.d9thc.toFixed(3)}%`, limit: '≤ 0.3%', status: normalizedCoa.status },
+        { analyte: 'Total THC (post-decarb)', result: `${normalizedCoa.totalThc.toFixed(3)}%`, limit: '≤ 0.3%', status: normalizedCoa.status },
+        ...(params.coa.cbd !== undefined
+          ? [{ analyte: 'CBD', result: `${params.coa.cbd.toFixed(3)}%`, limit: '—', status: 'informational' }]
+          : []),
+        ...(params.coa.moisture !== undefined
+          ? [{ analyte: 'Moisture', result: `${params.coa.moisture.toFixed(2)}%`, limit: '≤ 15%', status: params.coa.moisture <= 15 ? 'pass' : 'fail' }]
+          : []),
       ],
     },
-    {
-      title: 'Safety Panel',
-      type: 'table',
-      data: [
-        { panel: 'Pesticides', status: coa.pesticides ?? 'not_tested' },
-        { panel: 'Heavy Metals', status: coa.heavyMetals ?? 'not_tested' },
-        { panel: 'Microbials', status: coa.microbials ?? 'not_tested' },
-      ],
-    },
+
     {
       title: 'Compliance Determination',
       type: 'metric_grid',
       data: {
-        'Overall Status': coaEval.overallStatus,
+        'Overall Status': normalizedCoa.status, // Use status from normalized COA
         'Audit Chain': params.auditChainValid ? 'Intact' : 'BROKEN',
         'Decarboxylation Correction Applied': 'Yes (THCA × 0.877 + D9-THC)',
       },
@@ -151,12 +130,13 @@ export interface ComplianceAuditParams {
 
 export function buildComplianceAuditReport(params: ComplianceAuditParams): ReportDocument {
   const batchRows = params.batches.map((b) => {
-    const c = calculateCompliance({ thca: b.thca, d9thc: b.d9thc });
+    const c = normalizeCoaForDecisioning({ thca: b.thca, d9thc: b.d9thc, batchId: b.batchId });
+
     return {
       batchId: b.batchId,
       testDate: b.testDate,
       d9thc: `${(b.d9thc ?? 0).toFixed(3)}%`,
-      totalThc: `${(c.calculatedTotal ?? 0).toFixed(3)}%`,
+      totalThc: `${(c.totalThc ?? 0).toFixed(3)}%`,
       status: c.status,
       metrcStatus: b.status,
     };
@@ -164,7 +144,9 @@ export function buildComplianceAuditReport(params: ComplianceAuditParams): Repor
 
   const compliantCount = batchRows.filter((r) => r.status === 'compliant').length;
   const nonCompliantCount = batchRows.filter((r) => r.status === 'non_compliant').length;
-  const borderlineCount = batchRows.filter((r) => r.status === 'borderline').length;
+  const atRiskCount = batchRows.filter((r) => r.status === 'borderline').length;
+  const complianceRate =
+    params.batches.length === 0 ? '0.0%' : `${((compliantCount / params.batches.length) * 100).toFixed(1)}%`;
 
   const sections: ReportSection[] = [
     {
@@ -176,8 +158,8 @@ export function buildComplianceAuditReport(params: ComplianceAuditParams): Repor
         'Total Batches': params.batches.length,
         'Compliant': compliantCount,
         'Non-Compliant': nonCompliantCount,
-        'Borderline': borderlineCount,
-        'Compliance Rate': `${((compliantCount / params.batches.length) * 100).toFixed(1)}%`,
+        'At Risk': atRiskCount,
+        'Compliance Rate': complianceRate,
       },
     },
     {
@@ -435,6 +417,6 @@ function buildMetadata(
     generatedAt: new Date().toISOString(),
     generatedBy,
     reportType,
-    outputClassification: classifyOutput('deterministic', `reportTemplates.build_${reportType}`),
+    outputClassification: classifyOutput('deterministic'),
   };
 }

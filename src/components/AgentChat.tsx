@@ -654,7 +654,7 @@ Now decide the next best action or produce the final answer.
             {engineProvider === 'ollama' ? (
               <>
                 <Cpu size={12} className={isOllamaConnected ? 'animate-pulse' : ''} />
-                <span>Core CPU: {activeModelName} {isOllamaConnected ? isSimulated ? '(SIMULATED)' : '(LOCAL)' : '(OFFLINE)'}</span>
+                <span>Core CPU: {activeModelName} {isOllamaConnected ? isSimulated ? '(SIMULATED)' : '(LOCAL)' : '(UNREACHABLE)'}</span>
               </>
             ) : (
               <>

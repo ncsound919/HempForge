@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.github
+logs
+vault
+local-research
+*.log
+.env
+.firebase
+tests/playwright-report
+playwright-report
+test-results

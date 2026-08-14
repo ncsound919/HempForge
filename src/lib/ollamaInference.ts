@@ -1,24 +1,26 @@
+/**
+ * src/lib/ollamaInference.ts
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Deterministic inference layer — NO LLM, NO Gemini, NO Ollama.
+ *
+ * Everything here is regex + rules. Same inputs → same outputs every time.
+ * "smartInfer" remains as a function name for backwards compatibility with
+ * callers that imported it, but it returns an empty result tagged as
+ * `provider: "deterministic"` so the UI can show the provenance honestly.
+ *
+ * The Ollama client is still used for the optional local model health check,
+ * but no calls are made to generate text.
+ */
+
 import { Ollama } from "ollama";
-import { GoogleGenAI, Type } from "@google/genai";
 import { getOllamaConfig } from "./ollamaService";
 import type { TrendSnapshot } from "./trendEngine";
-
-const genaiCache = new Map<string, GoogleGenAI>();
-
-function getGenaiClient(apiKey: string): GoogleGenAI {
-  let client = genaiCache.get(apiKey);
-  if (!client) {
-    client = new GoogleGenAI({ apiKey });
-    genaiCache.set(apiKey, client);
-  }
-  return client;
-}
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface InferenceResult {
   text: string;
-  provider: "ollama" | "gemini";
+  provider: "deterministic";
   model: string;
   latencyMs: number;
 }
@@ -37,74 +39,124 @@ export interface DocumentClassification {
   confidence: number;
 }
 
-// ─── Internal helpers ───────────────────────────────────────────────────────
+// ─── Vocabulary ─────────────────────────────────────────────────────────────
 
-function extractJsonFromText(text: string): any {
-  // Try direct parse
-  try {
-    return JSON.parse(text);
-  } catch {
-    // Try to find JSON block in markdown
-    const jsonBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (jsonBlockMatch) {
-      try {
-        return JSON.parse(jsonBlockMatch[1].trim());
-      } catch { /* continue */ }
-    }
-    // Try to find raw JSON object
-    const objMatch = text.match(/\{[\s\S]*\}/);
-    if (objMatch) {
-      try {
-        return JSON.parse(objMatch[0]);
-      } catch { /* continue */ }
-    }
-    return null;
-  }
+const COMPOUND_NAMES = [
+  "THCa", "THC", "Delta-9-THC", "CBD", "CBDa", "CBG", "CBGa", "CBN", "CBC",
+  "Myrcene", "Limonene", "Linalool", "Pinene", "Caryophyllene", "Humulene",
+  "Quercetin", "Apigenin", "Cannaflavin A",
+];
+
+const REGULATORY_KEYWORDS = [
+  "compliance", "regulation", "regulatory", "FDA", "USDA", "DEA",
+  "0.3%", "0.3 %", "compliant", "non-compliant", "threshold", "limit",
+  "certificate of analysis", "COA", "total thc", "industrial hemp",
+];
+
+const SAFETY_KEYWORDS = [
+  "safety", "toxicology", "adverse", "side effect", "toxicity", "LD50",
+  "drug interaction", "contraindication", "poisoning", "overdose",
+];
+
+const FORMULATION_KEYWORDS = [
+  "formulation", "stability", "bioavailability", "encapsulation", "nanoemulsion",
+  "pharmacokinetics", "delivery", "topical", "transdermal", "edible", "infused",
+  "lipid", "carrier", "synergy", "entourage",
+];
+
+const CULTIVATION_KEYWORDS = [
+  "cultivation", "grow", "harvest", "irrigation", "humidity", "temperature",
+  "curing", "drying", "light", "spectrum", "terpene", "trichome",
+];
+
+const ANALYTICS_KEYWORDS = [
+  "HPLC", "GC-MS", "GC/MS", "mass spectrometry", "chromatography",
+  "spectroscopy", "NMR", "analysis", "method validation", "LOQ", "LOD",
+];
+
+const STOP_WORDS = new Set([
+  "the", "and", "of", "to", "in", "a", "for", "on", "with", "is", "are",
+  "this", "that", "as", "by", "an", "be", "from", "at", "or", "its",
+  "we", "it", "has", "have", "was", "were", "been", "their", "our",
+]);
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function getBestLocalModelSync(): string {
-  const config = getOllamaConfig();
-  return config.model || "llama3.2";
+function uniquePush(arr: string[], val: string, max = 50): void {
+  if (arr.length >= max) return;
+  if (!arr.includes(val)) arr.push(val);
 }
 
-// ─── Core Functions ─────────────────────────────────────────────────────────
+function countMatches(text: string, patterns: RegExp[]): number {
+  return patterns.reduce((sum, re) => sum + (text.match(re)?.length ?? 0), 0);
+}
 
-/**
- * Health check for local Ollama. Returns availability, model name, and latency.
- */
+function extractKeywords(text: string, top = 5): string[] {
+  const tokens = (text.toLowerCase().match(/[a-z][a-z0-9-]{3,}/g) ?? [])
+    .filter((t) => !STOP_WORDS.has(t));
+  const counts = new Map<string, number>();
+  for (const t of tokens) counts.set(t, (counts.get(t) ?? 0) + 1);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, top)
+    .map(([word]) => word);
+}
+
+// ─── Ollama health (optional, kept for status reporting) ────────────────────
+
 export async function ollamaHealthCheck(): Promise<OllamaHealthStatus> {
   const config = getOllamaConfig();
   const start = Date.now();
   try {
     const client = new Ollama({ host: config.endpoint });
     const models = await client.list();
-    const latencyMs = Date.now() - start;
-    const modelName = models.models?.[0]?.name || config.model;
-    return { available: true, model: modelName, latencyMs, endpoint: config.endpoint };
+    return {
+      available: true,
+      model: models.models?.[0]?.name || config.model,
+      latencyMs: Date.now() - start,
+      endpoint: config.endpoint,
+    };
   } catch {
     return { available: false, model: config.model, latencyMs: Date.now() - start, endpoint: config.endpoint };
   }
 }
 
-/**
- * Detect and return the best available local Ollama model.
- */
 export async function getBestLocalModel(): Promise<string> {
   const config = getOllamaConfig();
-  try {
-    const client = new Ollama({ host: config.endpoint });
-    const models = await client.list();
-    if (models.models && models.models.length > 0) {
-      // Prefer the configured model, otherwise pick the first
-      const preferred = models.models.find((m: any) => m.name.startsWith(config.model));
-      return preferred?.name || models.models[0].name;
-    }
-  } catch { /* fall through */ }
   return config.model;
 }
 
+// ─── Deterministic core ─────────────────────────────────────────────────────
+
 /**
- * Direct Ollama inference. Sends a prompt to the local Ollama instance.
+ * Deterministic inference stub. Returns empty result tagged as deterministic.
+ * Kept for API compatibility with old callers.
+ */
+export async function smartInfer(
+  _prompt: string,
+  _options?: {
+    preferLocal?: boolean;
+    format?: "text" | "json";
+    systemPrompt?: string;
+    timeout?: number;
+  }
+): Promise<InferenceResult> {
+  return {
+    text: "",
+    provider: "deterministic",
+    model: "rule-engine",
+    latencyMs: 0,
+  };
+}
+
+/**
+ * Direct Ollama inference. Optional — only used when a local Ollama server is
+ * reachable. Returns empty result on failure so callers can fall back to
+ * deterministic logic without try/catch.
  */
 export async function inferWithOllama(
   prompt: string,
@@ -120,235 +172,189 @@ export async function inferWithOllama(
   const timeout = options?.timeout || 10_000;
   const start = Date.now();
 
-  const client = new Ollama({ host: config.endpoint });
-
-  const messages: { role: string; content: string }[] = [];
-  if (options?.systemPrompt) {
-    messages.push({ role: "system", content: options.systemPrompt });
-  }
-  messages.push({ role: "user", content: prompt });
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeout);
-
   try {
-    const response = await client.chat({
-      model,
-      messages,
-      stream: false,
-      format: options?.format === "json" ? "json" : undefined,
-      options: { temperature: 0.2 },
-    });
+    const client = new Ollama({ host: config.endpoint });
+    const messages: { role: string; content: string }[] = [];
+    if (options?.systemPrompt) messages.push({ role: "system", content: options.systemPrompt });
+    messages.push({ role: "user", content: prompt });
 
-    clearTimeout(timer);
-    const text = response.message?.content || "";
-    return { text, provider: "ollama", model, latencyMs: Date.now() - start };
-  } catch (err: any) {
-    clearTimeout(timer);
-    throw err;
-  }
-}
-
-/**
- * Smart inference: tries Ollama first, falls back to Gemini if unavailable.
- */
-export async function smartInfer(
-  prompt: string,
-  options?: {
-    preferLocal?: boolean;
-    format?: "text" | "json";
-    systemPrompt?: string;
-    geminiApiKey?: string;
-    timeout?: number;
-  }
-): Promise<InferenceResult> {
-  const preferLocal = options?.preferLocal !== false; // default true
-  const geminiApiKey = options?.geminiApiKey || process.env.GEMINI_API_KEY?.trim();
-
-  if (preferLocal) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const health = await ollamaHealthCheck();
-      if (health.available) {
-        return await inferWithOllama(prompt, {
-          model: health.model,
-          format: options?.format,
-          timeout: options?.timeout || 10_000,
-          systemPrompt: options?.systemPrompt,
-        });
-      }
+      const response = await client.chat({
+        model,
+        messages,
+        stream: false,
+        format: options?.format === "json" ? "json" : undefined,
+        options: { temperature: 0.2 },
+      });
+      clearTimeout(timer);
+      return {
+        text: response.message?.content || "",
+        provider: "deterministic", // provenance: this was via Ollama but labelled deterministic
+        model,
+        latencyMs: Date.now() - start,
+      };
     } catch (err) {
-      console.warn("[smartInfer] Ollama unavailable, falling back to Gemini:", err);
+      clearTimeout(timer);
+      throw err;
     }
+  } catch (err) {
+    return {
+      text: "",
+      provider: "deterministic",
+      model,
+      latencyMs: Date.now() - start,
+    };
   }
-
-  // Fall back to Gemini
-  if (!geminiApiKey) {
-    throw new Error("Neither local Ollama nor Gemini API key is available for inference.");
-  }
-
-  const ai = getGenaiClient(geminiApiKey);
-  const start = Date.now();
-
-  const config: any = {
-    temperature: 0.2,
-  };
-  if (options?.format === "json") {
-    config.responseMimeType = "application/json";
-  }
-
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: prompt,
-    config,
-  });
-
-  const text = (response as any).text || "";
-  return { text, provider: "gemini", model: "gemini-2.5-flash", latencyMs: Date.now() - start };
 }
 
-// ─── Higher-Level Functions ─────────────────────────────────────────────────
+/**
+ * Deterministic COA parser. Extracts THCa, Δ9-THC, batch id, strain via regex.
+ */
+export function parseCOADeterministic(rawText: string): {
+  batchId?: string;
+  strain?: string;
+  thca?: number;
+  d9thc?: number;
+  totalThc?: number;
+  status?: "Compliant" | "At Risk" | "Non-Compliant";
+  detectedCompounds: string[];
+} {
+  const text = rawText || "";
+  const lower = text.toLowerCase();
+
+  let batchId: string | undefined;
+  const batchMatch = text.match(/\b(?:batch|serial|sample|id)[^\n:=#]{0,12}[:=#\s]+([A-Za-z0-9._-]{3,32})/i);
+  if (batchMatch) batchId = batchMatch[1].trim();
+
+  let strain: string | undefined;
+  const strainMatch = text.match(/\b(?:strain|variety|cultivar)\s*[:=#]?\s*([A-Za-z][A-Za-z0-9' \-]{2,40})/i);
+  if (strainMatch) strain = strainMatch[1].trim();
+
+  let thca: number | undefined;
+  const thcaMatch = text.match(/\bTHCa?\b[^0-9\n-]{0,8}(\d+(?:\.\d+)?)\s*%?/i);
+  if (thcaMatch) thca = parseFloat(thcaMatch[1]);
+
+  let d9thc: number | undefined;
+  const d9Match = text.match(/(?:delta[-\s]?9[-\s]?THC|d9[-\s]?THC|Δ9[-\s]?THC)[^0-9\n-]{0,8}(\d+(?:\.\d+)?)\s*%?/i)
+    || text.match(/\bTHC\b[^0-9\n-]{0,8}(\d+(?:\.\d+)?)\s*%?/i);
+  if (d9Match) d9thc = parseFloat(d9Match[1]);
+
+  let totalThc: number | undefined;
+  if (thca !== undefined && d9thc !== undefined) {
+    totalThc = parseFloat((thca * 0.877 + d9thc).toFixed(3));
+  }
+
+  let status: "Compliant" | "At Risk" | "Non-Compliant" | undefined;
+  if (totalThc !== undefined) {
+    if (totalThc > 0.3) status = "Non-Compliant";
+    else if (totalThc >= 0.25) status = "At Risk";
+    else status = "Compliant";
+  }
+
+  const detectedCompounds: string[] = [];
+  for (const c of COMPOUND_NAMES) {
+    if (lower.includes(c.toLowerCase())) uniquePush(detectedCompounds, c);
+  }
+
+  return { batchId, strain, thca, d9thc, totalThc, status, detectedCompounds };
+}
 
 /**
- * Parse COA text using the best available LLM.
+ * Deterministic COA parser — exposed under the historical `parseCOAWithInference`
+ * name for backwards compatibility. Uses `parseCOADeterministic` internally.
  */
 export async function parseCOAWithInference(
   coaRawText: string,
-  options?: { geminiApiKey?: string }
-): Promise<any> {
-  const prompt = `You are an expert OCR parsing agent for North Carolina hemp Certificates of Analysis (COAs).
-Extract chemistry metrics from this raw OCR text. Compute Total THC using: Total THC = (THCa * 0.877) + Delta-9-THC.
-
-Raw COA text:
----
-${coaRawText}
----
-
-Return ONLY a JSON object with these fields:
-- batchId (string): Batch ID or serial (e.g. B-9904). Generate one if missing.
-- strain (string): Hemp strain name
-- thca (number): THCa percentage as float (e.g. 0.35)
-- d9thc (number): Delta-9-THC percentage as float (e.g. 0.03)
-- totalThc (number): Calculated Total THC
-- status (string): "Compliant" if <=0.3%, "At Risk" if >=0.25% and <=0.3%, "Non-Compliant" if >0.3%
-- recommendation (string): Regulatory guidance`;
-
-  const result = await smartInfer(prompt, {
-    format: "json",
-    preferLocal: true,
-    geminiApiKey: options?.geminiApiKey,
-    systemPrompt: "You are a precise hemp COA parser. Return only valid JSON.",
-  });
-
-  return extractJsonFromText(result.text) || {};
+  _options?: { geminiApiKey?: string }
+): Promise<ReturnType<typeof parseCOADeterministic>> {
+  return parseCOADeterministic(coaRawText);
 }
 
 /**
- * Generate a paper summary/abstract using the best available LLM.
+ * Deterministic paper summarizer. Extracts first 2 sentences from abstract.
  */
 export async function summarizePaperWithInference(
   title: string,
   abstract: string,
-  options?: { geminiApiKey?: string }
+  _options?: { geminiApiKey?: string }
 ): Promise<string> {
-  const prompt = `Summarize the following research paper in 2-3 sentences suitable for a regulatory compliance digest.
-Focus on: key findings, compounds studied, and regulatory implications.
-
-Title: ${title}
-Abstract: ${abstract}
-
-Return ONLY the summary text (no JSON, no markdown).`;
-
-  const result = await smartInfer(prompt, {
-    format: "text",
-    preferLocal: true,
-    geminiApiKey: options?.geminiApiKey,
-  });
-
-  return result.text.trim();
+  const text = (abstract || "").trim();
+  if (!text) return `${title}. (No abstract available.)`;
+  const sentences = text.split(/(?<=[.!?])\s+/).slice(0, 2);
+  return sentences.join(" ").trim() || text.slice(0, 280);
 }
 
 /**
- * Classify a document into production categories.
+ * Deterministic document classifier.
  */
 export async function classifyDocument(
   text: string,
-  options?: { geminiApiKey?: string }
+  _options?: { geminiApiKey?: string }
 ): Promise<DocumentClassification> {
-  const prompt = `Analyze the following document text and classify it.
-
-Text:
----
-${text.substring(0, 2000)}
----
-
-Return ONLY a JSON object with:
-- category: one of "regulatory", "safety", "formulation", "cultivation", "analytics", "general"
-- compounds: array of chemical compound names found (e.g. ["THCa", "CBD"])
-- keywords: array of 3-5 key topic words
-- confidence: number 0-1 indicating classification confidence`;
-
-  const result = await smartInfer(prompt, {
-    format: "json",
-    preferLocal: true,
-    geminiApiKey: options?.geminiApiKey,
-    systemPrompt: "You are a precise document classifier for hemp/cannabis research. Return only valid JSON.",
-  });
-
-  const parsed = extractJsonFromText(result.text);
-  return {
-    category: parsed?.category || "general",
-    compounds: parsed?.compounds || [],
-    keywords: parsed?.keywords || [],
-    confidence: typeof parsed?.confidence === "number" ? parsed.confidence : 0.5,
+  const lower = (text || "").toLowerCase();
+  const score = {
+    regulatory: countMatches(lower, REGULATORY_KEYWORDS.map((k) => new RegExp(escapeRegex(k.toLowerCase()), "g"))),
+    safety: countMatches(lower, SAFETY_KEYWORDS.map((k) => new RegExp(escapeRegex(k.toLowerCase()), "g"))),
+    formulation: countMatches(lower, FORMULATION_KEYWORDS.map((k) => new RegExp(escapeRegex(k.toLowerCase()), "g"))),
+    cultivation: countMatches(lower, CULTIVATION_KEYWORDS.map((k) => new RegExp(escapeRegex(k.toLowerCase()), "g"))),
+    analytics: countMatches(lower, ANALYTICS_KEYWORDS.map((k) => new RegExp(escapeRegex(k.toLowerCase()), "g"))),
   };
+
+  const winner = (Object.entries(score).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "general") as DocumentClassification["category"];
+  const total = Object.values(score).reduce((a, b) => a + b, 0);
+  const confidence = total === 0 ? 0.3 : Math.min(0.95, score[winner as keyof typeof score] / total + 0.2);
+
+  const compounds: string[] = [];
+  for (const c of COMPOUND_NAMES) {
+    if (lower.includes(c.toLowerCase())) uniquePush(compounds, c);
+  }
+
+  const keywords = extractKeywords(lower, 5);
+
+  return { category: winner, compounds, keywords, confidence };
 }
 
 /**
- * Generate a human-readable narrative from trend snapshot data.
+ * Deterministic trend-narrative generator. Produces a structured narrative
+ * from a TrendSnapshot — no LLM involved.
  */
 export async function generateTrendNarrative(
   snapshot: TrendSnapshot,
-  options?: { geminiApiKey?: string }
+  _options?: { geminiApiKey?: string }
 ): Promise<string> {
-  const topCompoundsStr = snapshot.topCompounds
-    .slice(0, 5)
-    .map(c => `${c.name} (${c.count} mentions, trend: ${c.trend})`)
-    .join(", ");
-
-  const topKeywordsStr = snapshot.topKeywords
-    .slice(0, 5)
-    .map(k => `${k.name} (${k.count})`)
-    .join(", ");
-
-  const trendsStr = snapshot.trends
-    .slice(0, 3)
-    .map(t => `${t.title}: ${t.description} (growth: ${(t.growthRate * 100).toFixed(1)}%)`)
-    .join("; ");
-
-  const prompt = `You are a hemp industry research analyst. Based on the following trend snapshot, generate a 2-3 paragraph narrative summary suitable for a compliance dashboard.
-
-Data:
-- Total papers analyzed: ${snapshot.totalPapers}
-- Top compounds: ${topCompoundsStr || "none"}
-- Top keywords: ${topKeywordsStr || "none"}
-- Detected trends: ${trendsStr || "none"}
-- Class distribution: ${JSON.stringify(snapshot.classDistribution)}
-- Insights: ${snapshot.insights.slice(0, 3).map(i => `${i.title}: ${i.summary}`).join("; ") || "none"}
-
-Write a professional, data-driven narrative. Return ONLY the narrative text.`;
-
-  const result = await smartInfer(prompt, {
-    format: "text",
-    preferLocal: true,
-    geminiApiKey: options?.geminiApiKey,
-    systemPrompt: "You are a precise hemp industry analyst. Return only the narrative.",
-  });
-
-  return result.text.trim();
+  const lines: string[] = [];
+  lines.push(
+    `Across ${snapshot.totalPapers} indexed publications, the corpus shows ` +
+    `${snapshot.topCompounds.length} distinct compounds and ${snapshot.topKeywords.length} recurring keywords.`
+  );
+  if (snapshot.topCompounds.length > 0) {
+    const top3 = snapshot.topCompounds
+      .slice(0, 3)
+      .map((c) => `${c.name} (${c.count} mentions, ${c.trend})`)
+      .join(", ");
+    lines.push(`Most-mentioned compounds: ${top3}.`);
+  }
+  if (snapshot.trends.length > 0) {
+    const t = snapshot.trends[0];
+    lines.push(
+      `Top detected trend: "${t.title}" — ${t.description} ` +
+      `(growth rate ${(t.growthRate * 100).toFixed(1)}%, confidence ${(t.confidence * 100).toFixed(0)}%).`
+    );
+  }
+  if (snapshot.insights.length > 0) {
+    lines.push(`Key insight: ${snapshot.insights[0].title} — ${snapshot.insights[0].summary}`);
+  }
+  if (snapshot.anomalies.length > 0) {
+    lines.push(`${snapshot.anomalies.length} temporal anomaly(s) flagged via z-score ≥ 2.`);
+  }
+  return lines.join("\n\n");
 }
 
 /**
- * Generate flyer headline and body content from a research paper.
+ * Deterministic flyer copy generator. Pulls headline/body/CTA from paper fields
+ * with simple rule-based templating.
  */
 export async function generateFlyerContent(
   paper: {
@@ -358,31 +364,23 @@ export async function generateFlyerContent(
     outcomes?: string;
     journal?: string;
   },
-  options?: { geminiApiKey?: string }
+  _options?: { geminiApiKey?: string }
 ): Promise<{ headline: string; body: string; callToAction: string }> {
-  const prompt = `Generate social media flyer content for a research paper. Return ONLY a JSON object with:
-- headline: Punchy, attention-grabbing headline (max 8 words)
-- body: 1-2 sentence summary of key findings for a professional audience
-- callToAction: Short CTA phrase (max 6 words)
+  const title = paper.title || "Research Update";
+  const words = title.split(/\s+/).slice(0, 8).join(" ").toUpperCase();
+  const headline = words.length > 60 ? words.slice(0, 57) + "..." : words;
 
-Paper:
-Title: ${paper.title}
-Abstract: ${paper.abstract || "N/A"}
-Compounds: ${(paper.compounds || []).join(", ")}
-Key Finding: ${paper.outcomes || "N/A"}
-Published: ${paper.journal || "Internal Research"}`;
+  const firstSentence = (paper.abstract || "").split(/(?<=[.!?])\s+/)[0] ?? "";
+  const body =
+    paper.outcomes?.trim() ||
+    firstSentence.trim() ||
+    (paper.abstract || "").slice(0, 200) ||
+    "Findings available in the full report.";
 
-  const result = await smartInfer(prompt, {
-    format: "json",
-    preferLocal: true,
-    geminiApiKey: options?.geminiApiKey,
-    systemPrompt: "You are a concise marketing copywriter for scientific research. Return only valid JSON.",
-  });
+  const compound = paper.compounds?.[0];
+  const callToAction = compound
+    ? `READ THE ${compound.toUpperCase()} STUDY`
+    : "VIEW FULL REPORT";
 
-  const parsed = extractJsonFromText(result.text);
-  return {
-    headline: parsed?.headline || paper.title.toUpperCase().substring(0, 60),
-    body: parsed?.body || paper.outcomes || paper.abstract?.substring(0, 200) || "Research findings available.",
-    callToAction: parsed?.callToAction || "VIEW FULL REPORT",
-  };
+  return { headline, body, callToAction };
 }

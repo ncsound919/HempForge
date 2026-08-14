@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { getApps, initializeApp, cert, applicationDefault } from "firebase-admin/app";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import { getFirestore as getAdminFirestore } from "firebase-admin/firestore";
@@ -96,13 +97,39 @@ function getAdminAppSafe() {
   });
 }
 
-try {
-  const app = getAdminAppSafe();
-  const databaseId = firebaseConfig?.firestoreDatabaseId || "(default)";
-  adminDb = getAdminFirestore(app, databaseId);
-} catch (error) {
-  console.error("Failed to initialize Firebase Admin:", error);
-  adminDb = null;
+// Firebase Admin wiring.
+// Priority:
+//   1. If USE_LOCAL_DB_FALLBACK=true, reuse firebaseService.ts's adminDb
+//      (which is wired to the on-disk LocalFirestoreDB). This avoids spinning
+//      up an Admin SDK instance that cannot authenticate locally.
+//   2. Otherwise, attempt real Admin init via getAdminAppSafe().
+//   3. On failure, fall back to firebaseService.ts's shared adminDb.
+// NOTE: this module is loaded as ESM ("type": "module") so we use a
+// synchronous top-level import of firebaseService to inspect its adminDb
+// before deciding whether to initialize a real Admin SDK. firebaseService
+// itself evaluates the USE_LOCAL_DB_FALLBACK env var synchronously.
+import { adminDb as sharedAdminDb } from "../lib/firebaseService";
+
+if (process.env.USE_LOCAL_DB_FALLBACK === "true" && sharedAdminDb) {
+  adminDb = sharedAdminDb;
+  console.log("[backendServices] Reusing firebaseService adminDb (local fallback)");
+} else {
+  try {
+    const app = getAdminAppSafe();
+    const databaseId = firebaseConfig?.firestoreDatabaseId || "(default)";
+    adminDb = getAdminFirestore(app, databaseId);
+  } catch (error) {
+    console.error("Failed to initialize Firebase Admin:", error);
+    adminDb = null;
+  }
+}
+
+// When Admin SDK init fails AND we are in dev/fallback mode, defer to the
+// firebaseService adminDb instance (which falls back to the on-disk
+// LocalFirestoreDB). This keeps cron jobs like localFolderIndexer from
+// crashing the process when credentials are unavailable locally.
+if (!adminDb && process.env.NODE_ENV !== "production" && sharedAdminDb) {
+  adminDb = sharedAdminDb;
 }
 
 // Helper to sign audit entries (ALCOA++)
@@ -289,7 +316,67 @@ export const authMiddleware = async (req: any, res: any, next: any) => {
     return next();
   }
 
+  // Supabase-backed auth (production): validate the JWT against the Supabase
+  // project using the service role, then derive tenantId/role from the token's
+  // app_metadata. Supabase auth tokens are JWTs signed by the project — the
+  // service client's getUser() verifies signature + expiry server-side.
+  if (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    try {
+      const { createClient } = await import("@supabase/supabase-js");
+      const sb = createClient(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_ROLE_KEY,
+        { auth: { persistSession: false, autoRefreshToken: false } }
+      );
+      const { data, error } = await sb.auth.getUser(bearerToken);
+      if (!error && data?.user) {
+        const meta = (data.user.app_metadata || {}) as Record<string, any>;
+        const tenantId =
+          typeof meta.tenant_id === "string" && meta.tenant_id.trim()
+            ? meta.tenant_id
+            : "Global-Hemp-Wilson";
+        const role =
+          typeof meta.role === "string" && meta.role.trim()
+            ? meta.role
+            : "Lab Admin";
+        req.authContext = {
+          userId: data.user.id,
+          userEmail: data.user.email || "unknown@domain.com",
+          userRole: role,
+          tenantId,
+        };
+        req.decodedClaims = {
+          uid: data.user.id,
+          email: data.user.email,
+          tenantId,
+          role,
+        };
+        return next();
+      }
+      if (error) {
+        console.error("Supabase token verification failed:", error.message);
+      }
+      // fall through to Firebase paths below for backwards-compat
+    } catch (err) {
+      console.error("Supabase auth error:", err);
+    }
+  }
+
   try {
+    // Guard: when the Admin SDK is not initialized (dev/fallback mode) the
+    // server cannot verify real Firebase JWTs. Only dev tokens are accepted
+    // in this mode. This prevents confusing "FirebaseApp not initialized"
+    // errors from leaking to the client.
+    if (!getApps().length) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        details:
+          "Firebase Admin SDK is not initialized on the server. " +
+          "Use a dev token (Bearer dev-<uid>:<email>:<tenantId>:<role>) " +
+          "or provision FIREBASE_SERVICE_ACCOUNT_JSON / Application Default Credentials.",
+      });
+    }
+
     const decoded = await getAdminAuth().verifyIdToken(bearerToken);
 
     if (!decoded?.uid) {
@@ -374,22 +461,17 @@ export function createRateLimiter(name: string, maxRequests: number, windowMs: n
   };
 }
 
-export const geminiRateLimiter = createRateLimiter("gemini", 10, 60 * 1000);
 export const literatureRateLimiter = createRateLimiter("literature", 5, 60 * 1000);
-
-// Backwards-compatible wrappers
-export const GEMINI_LIMIT_MAX_REQUESTS = 10;
-
-export function checkGeminiRateLimit(userId: string): { allowed: boolean; remaining: number; resetTime: number } {
-  return geminiRateLimiter.check(userId);
-}
 
 export function checkLitRateLimit(uid: string): boolean {
   return literatureRateLimiter.check(uid).allowed;
 }
 
-export function isValidGeminiKey(key: string | undefined): boolean {
-  if (!key) return false;
-  const cleaned = key.trim();
-  return cleaned.startsWith("AIzaSy") && cleaned.length > 10 && cleaned !== "MY_GEMINI_API_KEY";
+/**
+ * @deprecated Gemini is no longer supported. This stub remains so legacy
+ * imports do not break. New code must use the deterministic rule engine in
+ * `src/lib/decisionEngine.ts` and the `src/agents/agentEngine.ts` pipeline.
+ */
+export function isValidGeminiKey(_key: string | undefined): boolean {
+  return false;
 }

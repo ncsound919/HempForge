@@ -10,18 +10,28 @@ import {
   getAuditLogs,
   saveAuditLog,
   createAuditHash,
-  checkGeminiRateLimit,
-  GEMINI_LIMIT_MAX_REQUESTS,
 } from "../services/backendServices";
-import { verifyAuditChain } from "../lib/auditEngine";
+import { verifyAuditChain, type AuditEntry } from "../lib/auditEngine";
 import type { AuditLog } from "../lib/firebaseService";
 import { DEFAULT_TENANT } from "../config";
 
-function isChainedAuditEntry(log: AuditLog): log is AuditLog & {
-  sequenceNumber: number;
-  previousHash: string;
-} {
-  return typeof (log as any).sequenceNumber === "number" && typeof (log as any).previousHash === "string";
+
+function normalizeAuditCategory(category: AuditLog["category"]): AuditEntry["category"] {
+  switch (category) {
+    case "DATA_CHANGE":
+    case "AI_INFERENCE":
+    case "SYSTEM_INTEGRATION":
+      return category;
+    case "AUTH":
+    case "COMPLIANCE_ALARM":
+    default:
+      return "USER_ACTION";
+  }
+}
+
+function isChainedAuditEntry(log: AuditLog): log is AuditLog & { sequenceNumber: number; previousHash: string } {
+  return typeof (log as any).sequenceNumber === "number" &&
+    typeof (log as any).previousHash === "string";
 }
 
 export function auditRouter(deps: { authMiddleware: RequestHandler }): Router {
@@ -68,15 +78,6 @@ export function auditRouter(deps: { authMiddleware: RequestHandler }): Router {
   // ─── POST /api/audit/verify-chain ──────────────────────────────────────────
   router.post("/verify-chain", deps.authMiddleware, async (req, res) => {
     const userContext = req.authContext;
-    const userId = userContext?.userId || "unknown-user";
-
-    const rateLimit = checkGeminiRateLimit(userId);
-    if (!rateLimit.allowed) {
-      return res.status(429).json({
-        error: "Rate limit exceeded for audit verification.",
-        details: `Please try again after ${new Date(rateLimit.resetTime).toLocaleTimeString()}.`,
-      });
-    }
 
     if (userContext?.userRole !== "Quality Auditor" && userContext?.userRole !== "Lab Admin") {
       return res.status(403).json({
@@ -89,11 +90,23 @@ export function auditRouter(deps: { authMiddleware: RequestHandler }): Router {
       const tenantId = userContext?.tenantId || DEFAULT_TENANT;
       const tenantLogs = logs.filter((log) => log.tenantId === tenantId);
 
-      const chainEntries = tenantLogs.filter(isChainedAuditEntry) as unknown as Array<
-        AuditLog & { sequenceNumber: number; previousHash: string }
-      >;
-      const legacyLogs = tenantLogs.filter((log) => !isChainedAuditEntry(log));
+      const chainEntries: AuditEntry[] = tenantLogs
+        .filter(isChainedAuditEntry)
+        .map((log) => ({
+          id: log.id,
+          sequenceNumber: (log as any).sequenceNumber,
+          timestamp: log.timestamp,
+          userId: log.userId,
+          userRole: log.userRole,
+          tenantId: log.tenantId,
+          action: log.action,
+          details: log.details,
+          category: normalizeAuditCategory(log.category),
+          previousHash: (log as any).previousHash,
+          hash: log.hash,
+        }));
 
+      const legacyLogs = tenantLogs.filter((log) => !isChainedAuditEntry(log));
       const chainResult = verifyAuditChain(chainEntries);
 
       const legacyResults = legacyLogs.map((log) => {
@@ -136,6 +149,3 @@ export function auditRouter(deps: { authMiddleware: RequestHandler }): Router {
 
   return router;
 }
-
-// Re-export so existing imports keep working
-export { GEMINI_LIMIT_MAX_REQUESTS };

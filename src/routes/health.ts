@@ -9,7 +9,8 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { Router, RequestHandler } from "express";
-import { adminDb, isValidGeminiKey } from "../services/backendServices";
+import { adminDb } from "../services/backendServices";
+import { localDb } from "../lib/firebaseService";
 import { ollamaHealthCheck } from "../lib/ollamaInference";
 import { exportPermissionsManifest } from "../lib/permissionsEngine";
 
@@ -18,7 +19,7 @@ export function healthRouter(deps: { authMiddleware: RequestHandler }): Router {
 
   // ─── GET /api/health ───────────────────────────────────────────────────────
   router.get("/", async (_req, res) => {
-    const geminiConfigured = isValidGeminiKey(process.env.GEMINI_API_KEY?.trim());
+    const usingLocalFallback = adminDb === localDb;
     const firestoreAvailable = adminDb !== null;
     const coaSigningConfigured =
       !!process.env.COA_SIGNING_SECRET && process.env.COA_SIGNING_SECRET.length >= 32;
@@ -32,32 +33,35 @@ export function healthRouter(deps: { authMiddleware: RequestHandler }): Router {
     }
 
     const degradedServices: string[] = [];
-    if (!geminiConfigured) degradedServices.push("gemini-ai (chat, paper generation, COA parsing will use heuristic fallback)");
-    if (!firestoreAvailable) degradedServices.push("firestore (using local fallback DB — data is NOT persistent)");
+    if (!firestoreAvailable) degradedServices.push("firestore (unavailable)");
+    if (usingLocalFallback) degradedServices.push("firestore (LOCAL FALLBACK — data is NOT persistent)");
     if (!coaSigningConfigured) degradedServices.push("coa-signing (COA cryptographic signatures unavailable)");
-    if (!ollamaAvailable) degradedServices.push("ollama (local AI inference unavailable)");
+    if (!ollamaAvailable) degradedServices.push("ollama (optional local model server unavailable)");
 
     const status = degradedServices.length === 0 ? "healthy" : "degraded";
 
     res.json({
       status,
       timestamp: new Date().toISOString(),
+      mode: "fully-deterministic",
       services: {
-        gemini: { available: geminiConfigured, classification: geminiConfigured ? "live-ai-inference" : "heuristic-fallback" },
-        ollama: { available: ollamaAvailable, classification: ollamaAvailable ? "live-ai-inference" : "unavailable" },
-        firestore: { available: firestoreAvailable, classification: firestoreAvailable ? "production-real" : "demo-only" },
+        agentEngine: { available: true, classification: "rule-engine" },
+        autonomy: { available: true, classification: "cron-driven" },
+        ollama: { available: ollamaAvailable, classification: ollamaAvailable ? "local-model" : "unavailable" },
+        firestore: {
+          available: firestoreAvailable,
+          classification: usingLocalFallback ? "local-fallback" : firestoreAvailable ? "production-real" : "unavailable",
+        },
         coaSigning: { available: coaSigningConfigured, classification: coaSigningConfigured ? "production-real" : "unavailable" },
       },
       degradedServices,
-      disclaimer: degradedServices.length > 0
-        ? "Some services are unavailable. Outputs from degraded services will be clearly labeled as simulated/heuristic and MUST NOT be used for compliance decisions."
-        : "All services operational. Outputs are live and verified.",
+      disclaimer:
+        "All AI features are now deterministic (rule-based + math). No cloud LLM is required. Optional Ollama is purely additive.",
     });
   });
 
   // ─── GET /api/security/policy ──────────────────────────────────────────────
   router.get("/policy", deps.authMiddleware, (req, res) => {
-    const geminiConfigured = isValidGeminiKey(process.env.GEMINI_API_KEY?.trim());
     const firestoreAvailable = adminDb !== null;
 
     res.json({
@@ -99,7 +103,8 @@ export function healthRouter(deps: { authMiddleware: RequestHandler }): Router {
       },
       currentServiceStatus: {
         firestore: firestoreAvailable ? "ACTIVE" : "FALLBACK (local-db)",
-        aiInference: geminiConfigured ? "ACTIVE (Gemini)" : "DEGRADED (heuristic fallback)",
+        inference: "DETERMINISTIC (rule engine)",
+        autonomy: "ACTIVE (cron + on-demand)",
       },
     });
   });

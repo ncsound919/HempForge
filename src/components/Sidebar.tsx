@@ -1,14 +1,20 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { 
-  LayoutDashboard, 
-  FileCheck2, 
-  Bot, 
+import {
+  LayoutDashboard,
+  FileCheck2,
+  Bot,
   Settings,
   Leaf,
   Database,
   Beaker,
   GitMerge,
+  Notebook as NotebookIcon,
+  Zap,
+  Brain,
+  Globe,
+  FlaskConical,
+  CreditCard,
 } from 'lucide-react';
 
 export default function Sidebar() {
@@ -22,8 +28,14 @@ export default function Sidebar() {
     { id: '/agent-workspace', label: 'Agentic Workspace', icon: Bot },
     { id: '/vault', label: 'Knowledge Vault', icon: Database },
     { id: '/lab', label: 'Research Lab', icon: Beaker },
+    { id: '/notebook', label: 'Notebook', icon: NotebookIcon },
+    { id: '/autonomy', label: 'Autonomy', icon: Zap },
+    { id: '/memory', label: 'Agent Memory', icon: Brain },
+    { id: '/agents-browser', label: 'Agent Browser', icon: Zap },
+    { id: '/researchclaw', label: 'Research Pipeline', icon: Globe },
+    { id: '/blackmind', label: 'Science Engine', icon: FlaskConical },
     { id: '/workflows', label: 'Workflows & ROI', icon: GitMerge },
-    { id: '/settings', label: 'Settings', icon: Settings },
+    { id: '/settings', label: 'Billing & Settings', icon: CreditCard },
   ];
 
   return (

@@ -18,8 +18,10 @@ import { TenantRepository } from '../lib/firebaseRepo';
 import { normalizeMetrcPackage } from '../lib/metrcApiClient';
 import { computeTrendSnapshot, scoreRegulatoryRisk } from '../lib/trendEngine';
 import { verifyAuditChain } from '../lib/auditEngine';
-import { calculateCompliance } from '../lib/complianceEngine';
+import { calculateCompliance, scoreBatchRisk } from '../lib/complianceEngine';
+import { normalizeCoaForDecisioning } from '../lib/coaNormalizer';
 import { structuredLog } from '../lib/structuredLogger';
+import { type AuditEntry } from '../lib/auditEngine'; // Import AuditEntry for verifyAuditChain
 
 // ---------------------------------------------------------------------------
 // Types
@@ -45,7 +47,7 @@ async function syncMetrcPackages(config: SchedulerConfig): Promise<void> {
     try {
       const apiKey = config.metrcApiKeys[tenantId];
       if (!apiKey) {
-        structuredLog('warn', 'syncMetrcPackages', `No Metrc API key for tenant ${tenantId}`);
+        structuredLog('warn', `No Metrc API key for tenant ${tenantId}`, { job: 'syncMetrcPackages', tenantId });
         continue;
       }
 
@@ -55,19 +57,19 @@ async function syncMetrcPackages(config: SchedulerConfig): Promise<void> {
       );
       if (!resp.ok) throw new Error(`Metrc responded ${resp.status}`);
 
-      const raw: unknown[] = await resp.json();
-      const normalized = raw.map((pkg: any) => normalizeMetrcPackage(pkg, tenantId));
+const raw: unknown[] = await resp.json();
+      const normalized = (raw as any[]).map((pkg: any) => normalizeMetrcPackage(pkg, tenantId));
 
       if (!config.dryRun) {
         const repo = new TenantRepository<any>('metrcPackages', tenantId);
         for (const pkg of normalized) {
-          await repo.save({ id: (pkg as any).packageId, ...pkg });
+          await repo.upsert(pkg.packageId, pkg);
         }
       }
 
-      structuredLog('info', 'syncMetrcPackages', `Synced ${normalized.length} packages for ${tenantId}`);
+structuredLog('info', `syncMetrcPackages: Synced ${normalized.length} packages for ${tenantId}`, {});
     } catch (err) {
-      structuredLog('error', 'syncMetrcPackages', `Failed for tenant ${tenantId}`, { error: String(err) });
+      structuredLog('error', `syncMetrcPackages: Failed for tenant ${tenantId}`, { error: String(err) });
     }
   }
 }
@@ -79,24 +81,22 @@ async function syncMetrcPackages(config: SchedulerConfig): Promise<void> {
 async function computeAllTrendSnapshots(config: SchedulerConfig): Promise<void> {
   for (const tenantId of config.tenantIds) {
     try {
-      const snapshot = await computeTrendSnapshot(tenantId);
-      if (!snapshot) {
-        structuredLog('warn', 'computeAllTrendSnapshots', `No snapshot computed for ${tenantId}`);
-        continue;
-      }
+      const coaRepo = new TenantRepository<any>('coas', tenantId);
+      const coas = await coaRepo.list();
+
+      const snapshot = computeTrendSnapshot(tenantId);
 
       if (!config.dryRun) {
         const snapshotRepo = new TenantRepository<any>('trendSnapshots', tenantId);
-        await snapshotRepo.save({
-          id: `snapshot_${Date.now()}`,
+        await snapshotRepo.upsert(`snapshot_${Date.now()}`, {
           ...snapshot,
           computedAt: new Date().toISOString(),
         });
       }
 
-      structuredLog('info', 'computeAllTrendSnapshots', `Trend snapshot saved for ${tenantId}`);
+structuredLog('info', `computeAllTrendSnapshots: Trend snapshot saved for ${tenantId}`, {});
     } catch (err) {
-      structuredLog('error', 'computeAllTrendSnapshots', `Failed for tenant ${tenantId}`, { error: String(err) });
+      structuredLog('error', `computeAllTrendSnapshots: Failed for tenant ${tenantId}`, { error: String(err) });
     }
   }
 }
@@ -112,22 +112,35 @@ async function verifyAllAuditChains(config: SchedulerConfig): Promise<void> {
       const logs = await auditRepo.list();
       logs.sort((a: any, b: any) => a.timestamp - b.timestamp);
 
-      const result = verifyAuditChain(logs);
+      const chainEntries: AuditEntry[] = logs.map(log => ({
+        id: log.id,
+        sequenceNumber: log.sequenceNumber || 0,
+        timestamp: log.timestamp || 0,
+        userId: log.userId || '',
+        userRole: log.userRole || '',
+        tenantId: log.tenantId || '',
+        action: log.action || '',
+        details: log.details || '',
+        category: log.category || 'SYSTEM_INTEGRATION',
+        previousHash: log.previousHash || '',
+        hash: log.hash || '',
+      }));
+
+      const result = verifyAuditChain(chainEntries);
 
       if (!result.valid && !config.dryRun) {
         const alertRepo = new TenantRepository<any>('auditAlerts', tenantId);
-        await alertRepo.save({
-          id: `break_${Date.now()}`,
+        await alertRepo.upsert(`break_${Date.now()}`, {
           detectedAt: new Date().toISOString(),
           brokenAt: (result as any).brokenAt,
           severity: 'critical',
         });
-        structuredLog('warn', 'verifyAllAuditChains', `Audit chain BROKEN for ${tenantId}`);
+structuredLog('warn', `verifyAllAuditChains: Audit chain BROKEN for ${tenantId}`, {});
       } else {
-        structuredLog('info', 'verifyAllAuditChains', `Audit chain intact for ${tenantId} (${logs.length} entries)`);
+        structuredLog('info', `verifyAllAuditChains: Audit chain intact for ${tenantId} (${logs.length} entries)`, {});
       }
     } catch (err) {
-      structuredLog('error', 'verifyAllAuditChains', `Failed for tenant ${tenantId}`, { error: String(err) });
+      structuredLog('error', `verifyAllAuditChains: Failed for tenant ${tenantId}`, { error: String(err) });
     }
   }
 }
@@ -135,6 +148,8 @@ async function verifyAllAuditChains(config: SchedulerConfig): Promise<void> {
 // ---------------------------------------------------------------------------
 // Job 4 — Compliance Threshold Sweep (every 6 hours)
 // ---------------------------------------------------------------------------
+
+
 
 async function sweepComplianceThresholds(config: SchedulerConfig): Promise<void> {
   for (const tenantId of config.tenantIds) {
@@ -145,12 +160,18 @@ async function sweepComplianceThresholds(config: SchedulerConfig): Promise<void>
       const crossed: Array<{ batchId: string; totalThc: number; status: string }> = [];
 
       for (const coa of coas) {
-        const result = calculateCompliance({
-          thca: Number(coa.thca) || 0,
-          d9thc: Number(coa.d9thc) || 0,
+        const normalized = normalizeCoaForDecisioning({
+            batchId: coa.batchId,
+            productName: coa.strain || coa.productName || 'Unknown',
+            productType: coa.productType || 'Flower',
+            labName: coa.labName || 'Unknown',
+            testDate: coa.testDate || coa.uploadDate || new Date().toISOString(),
+            thca: Number(coa.thca) || 0,
+            d9thc: Number(coa.d9thc) || 0,
         });
-        if ((result as any).status !== 'Compliant' && !coa.flagged) {
-          crossed.push({ batchId: coa.batchId, totalThc: (result as any).calculatedTotal, status: (result as any).status });
+
+        if (normalized.status !== 'compliant' && !coa.flagged) {
+          crossed.push({ batchId: normalized.batchId, totalThc: normalized.totalThc, status: normalized.status });
           if (!config.dryRun) {
             await coaRepo.save({ ...coa, flagged: true });
           }
@@ -159,17 +180,15 @@ async function sweepComplianceThresholds(config: SchedulerConfig): Promise<void>
 
       if (crossed.length > 0 && !config.dryRun) {
         const alertRepo = new TenantRepository<any>('complianceAlerts', tenantId);
-        await alertRepo.save({
-          id: `sweep_${Date.now()}`,
+        await alertRepo.upsert(`sweep_${Date.now()}`, {
           detectedAt: new Date().toISOString(),
           newlyFlagged: crossed,
         });
       }
 
-      structuredLog('info', 'sweepComplianceThresholds',
-        `Sweep complete for ${tenantId}: ${crossed.length} newly flagged, ${coas.length} total scanned`);
+structuredLog('info', `sweepComplianceThresholds: Sweep complete for ${tenantId}: ${crossed.length} newly flagged, ${coas.length} total scanned`, {});
     } catch (err) {
-      structuredLog('error', 'sweepComplianceThresholds', `Failed for tenant ${tenantId}`, { error: String(err) });
+      structuredLog('error', `sweepComplianceThresholds: Failed for tenant ${tenantId}`, { error: String(err) });
     }
   }
 }
@@ -185,33 +204,21 @@ async function scoreAllRegulatoryRisk(config: SchedulerConfig): Promise<void> {
       const batches = await batchRepo.list();
 
       const scores = batches.map((b: any) => {
-        const compoundName = b.strain || b.compound || 'unknown';
-        const paperLike = {
-          normalizedTitle: b.strain || '',
-          normalizedAbstract: b.notes || b.recommendation || '',
-          compoundTags: b.compounds || [compoundName],
-        };
-        const compoundCount = new Map<string, number>([[compoundName, 1]]);
-        const topCompounds = [{ name: compoundName, count: 1 }];
-        const [risk] = scoreRegulatoryRisk([paperLike], compoundCount, topCompounds);
-        const riskScore = risk?.riskScore ?? 0;
-        const riskLevel = riskScore >= 60 ? 'high' : riskScore >= 30 ? 'medium' : 'low';
-        return { batchId: b.batchId, riskScore, riskLevel };
+        const risk = scoreBatchRisk(b);
+        return { batchId: b.batchId, riskScore: risk.score, riskLevel: risk.level };
       });
 
       if (!config.dryRun) {
         const riskRepo = new TenantRepository<any>('riskScores', tenantId);
-        await riskRepo.save({
-          id: `risk_${Date.now()}`,
+        await riskRepo.upsert(`risk_${Date.now()}`, {
           scoredAt: new Date().toISOString(),
           scores,
         });
       }
 
-      structuredLog('info', 'scoreAllRegulatoryRisk',
-        `Risk scoring complete for ${tenantId}: ${batches.length} batches scored`);
+structuredLog('info', `scoreAllRegulatoryRisk: Risk scoring complete for ${tenantId}: ${batches.length} batches scored`, {});
     } catch (err) {
-      structuredLog('error', 'scoreAllRegulatoryRisk', `Failed for tenant ${tenantId}`, { error: String(err) });
+      structuredLog('error', `scoreAllRegulatoryRisk: Failed for tenant ${tenantId}`, { error: String(err) });
     }
   }
 }
@@ -258,6 +265,6 @@ export function registerAutonomousJobs(config: SchedulerConfig): void {
     void scoreAllRegulatoryRisk(config);
   }, { name: 'risk-scoring', timezone: 'America/New_York' });
 
-  structuredLog('info', 'registerAutonomousJobs',
-    `5 autonomous jobs registered for tenants: [${config.tenantIds.join(', ')}]. dryRun=${config.dryRun ?? false}`);
+structuredLog('info', `registerAutonomousJobs: 5 autonomous jobs registered for tenants: [${config.tenantIds.join(', ')}]. dryRun=${config.dryRun ?? false}`, {});
 }
+

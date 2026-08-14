@@ -1,16 +1,9 @@
 /**
  * routes/reports.ts
  * ─────────────────────────────────────────────────────────────────────────────
- * Compliance & ROI report generation.
- *
- * Tiered execution model:
- *   Tier 1 — reportTemplates assembles ALL structured sections deterministically
- *   Tier 3/4 — LLM (Ollama or Gemini via llmGate) fills narrative_placeholder
- *              sections only. If neither LLM is available, executiveSummary
- *              is omitted and the report is still complete and valid.
- *
- * The platform never hard-fails due to a missing GEMINI_API_KEY.
- * ─────────────────────────────────────────────────────────────────────────────
+ * Compliance & ROI report generation. Fully deterministic — no LLM, no
+ * Gemini, no Ollama. Executive narratives come from the rule-based report
+ * templates.
  */
 import { Router, RequestHandler } from "express";
 import { adminDb, createAuditHash, saveAuditLog } from "../services/backendServices";
@@ -25,7 +18,6 @@ import {
   buildComplianceAuditReport,
   type ComplianceAuditParams,
 } from "../lib/reportTemplates";
-import { llmGate, selectLLM, withTierMeta } from "../middleware/llmGate";
 import { requirePermission } from "../lib/permissionsEngine";
 import type { AuditLog } from "../lib/firebaseService";
 import { DEFAULT_TENANT } from "../config";
@@ -33,13 +25,9 @@ import { DEFAULT_TENANT } from "../config";
 export function reportsRouter(deps: { authMiddleware: RequestHandler }): Router {
   const router = Router();
 
-  // ─── POST /api/reports/generate ────────────────────────────────────────────
-  // llmGate runs first: probes Gemini key + Ollama reachability, attaches
-  // req.llmAvailable so the handler can select the right tier without blocking.
   router.post(
     "/generate",
     deps.authMiddleware,
-    llmGate,
     requirePermission("GENERATE_REPORT"),
     async (req, res) => {
       const userContext = req.authContext;
@@ -88,31 +76,7 @@ export function reportsRouter(deps: { authMiddleware: RequestHandler }): Router 
           };
 
           tieredDoc = buildComplianceAuditReport(params);
-
-          // ── Tier 3/4: LLM fills only the narrative placeholder ───────────
-          const llm = selectLLM(req.llmAvailable);
-          if (llm) {
-            const placeholder = tieredDoc.sections.find(
-              (s: any) => s.type === "narrative_placeholder"
-            );
-            if (placeholder?.data?.prompt) {
-              try {
-                const narrative = await llm(
-                  `${placeholder.data.prompt}\n\nData: ${JSON.stringify({
-                    batchCount: params.batches.length,
-                    periodStart: params.periodStart,
-                    periodEnd: params.periodEnd,
-                    auditChainValid: params.auditChainValid,
-                  })}`
-                );
-                tieredDoc.executiveSummary = narrative;
-              } catch {
-                // LLM failed mid-request — degrade gracefully, report is still complete
-                tieredDoc.executiveSummary = null;
-              }
-            }
-          }
-
+          // No LLM available; report is still complete without executiveSummary.
           report = tieredDoc;
         } else {
           // Legacy reportEngine path for compliance-roi and other types
@@ -146,7 +110,7 @@ export function reportsRouter(deps: { authMiddleware: RequestHandler }): Router 
           userRole: userContext?.userRole || "Operator",
           tenantId,
           action: "REPORT_GENERATED",
-          details: `${reportType} report generated. ID: ${reportId}. Batches: ${batches.length}. Tier: ${req.llmAvailable.bestTier}.`,
+          details: `${reportType} report generated. ID: ${reportId}. Batches: ${batches.length}. Tier: deterministic.`,
           category: "DATA_CHANGE",
         };
         const hashedAudit = { ...auditEntry, hash: createAuditHash(auditEntry) };
@@ -161,7 +125,7 @@ export function reportsRouter(deps: { authMiddleware: RequestHandler }): Router 
           return res.send(formatReportAsHtml(report));
         }
 
-        res.json(withTierMeta(req.llmAvailable, { report, auditLog: hashedAudit }));
+        res.json({ report, auditLog: hashedAudit, tier: "deterministic" });
       } catch (err: any) {
         console.error("Report generation error:", err);
         res.status(500).json({ error: "Report generation failed" });

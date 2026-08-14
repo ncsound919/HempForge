@@ -4,6 +4,8 @@ export interface OllamaConfig {
   model: string;
   preferredProvider: 'ollama' | 'gemini';
   simulate: boolean; // Simulation toggle for demo/unreachable environments
+  /** How often the server probes the endpoint for health (ms). */
+  probeIntervalMs: number;
 }
 
 export interface OllamaModel {
@@ -12,14 +14,27 @@ export interface OllamaModel {
   family?: string;
 }
 
-export const DEFAULT_OLLAMA_CONFIG: OllamaConfig = {
-  endpoint: 'http://127.0.0.1:11434',
-  model: 'llama3.2',
+const SERVER_DEFAULT: OllamaConfig = {
+  endpoint:
+    typeof process !== "undefined" && process.env && process.env.OLLAMA_HOST
+      ? process.env.OLLAMA_HOST
+      : 'http://127.0.0.1:11434',
+  model:
+    typeof process !== "undefined" && process.env && process.env.OLLAMA_MODEL
+      ? process.env.OLLAMA_MODEL
+      : 'llama3.2',
   preferredProvider: 'ollama',
-  simulate: false, // Default to false so the system automatically detects real local models first!
+  simulate: false,
+  probeIntervalMs: 15_000,
 };
 
+export const DEFAULT_OLLAMA_CONFIG: OllamaConfig = SERVER_DEFAULT;
+
 export function getOllamaConfig(): OllamaConfig {
+  // Server-side: read from env vars only (localStorage is browser-only).
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    return SERVER_DEFAULT;
+  }
   try {
     const saved = localStorage.getItem('hempforge_ollama_config');
     if (saved) {
@@ -33,6 +48,10 @@ export function getOllamaConfig(): OllamaConfig {
 }
 
 export function setOllamaConfig(config: Partial<OllamaConfig>): void {
+  if (typeof window === "undefined" || typeof localStorage === "undefined") {
+    // No-op server-side. Env-driven config only.
+    return;
+  }
   try {
     const current = getOllamaConfig();
     const updated = { ...current, ...config };

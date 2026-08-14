@@ -57,16 +57,8 @@ export const logger = {
     emit("error", msg, fields);
   },
 };
-/**
- * Compatibility shim — autonomousJobs.ts imports `structuredLog` as a
- * function rather than the `logger` object. This re-exports it as a simple
- * function: structuredLog(level, job, msg, fields?)
- */
-export function structuredLog(
-  level: "debug" | "info" | "warn" | "error",
-  job: string,
-  msg: string,
-  fields: Record<string, unknown> = {}
-): void {
-  logger[level](`[${job}] ${msg}`, fields);
+
+// Legacy function export for backward compatibility
+export function structuredLog(level: Level, msg: string, fields: Record<string, unknown> = {}): void {
+  emit(level, msg, fields);
 }

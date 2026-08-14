@@ -14,6 +14,14 @@ import PublicCOAVerifierPage from './components/PublicCOAVerifierPage';
 import SignIn from './components/SignIn';
 import NotFound from './components/NotFound';
 import WorkflowDashboard from './components/WorkflowDashboard';
+import Notebook from './components/Notebook';
+import AutonomyCommandCenter from './components/AutonomyCommandCenter';
+import MemoryExplorer from './components/MemoryExplorer';
+import AgentBrowserDashboard from './components/AgentBrowser/AgentBrowserDashboard';
+import ResearchPipelineDashboard from './components/ResearchClaw/ResearchPipelineDashboard';
+import ScienceLabPanel from './components/BlackMind/ScienceLabPanel';
+import KnowledgeGraphViewer from './components/BlackMind/KnowledgeGraphViewer';
+import CrossDomainAnalyticsDashboard from './components/BlackMind/CrossDomainAnalyticsDashboard';
 import { UserProvider, COAProvider, useUser, useCOAs } from './contexts';
 
 
@@ -103,6 +111,14 @@ function AppShell() {
             <Route path="/agent-workspace" element={<LabWorkspace />} />
             <Route path="/vault"          element={<Vault />} />
             <Route path="/lab"            element={<ResearchLab />} />
+            <Route path="/notebook"       element={<Notebook />} />
+            <Route path="/autonomy"       element={<AutonomyCommandCenter />} />
+            <Route path="/memory"         element={<MemoryExplorer />} />
+            <Route path="/agents-browser" element={<AgentBrowserDashboard />} />
+            <Route path="/researchclaw"   element={<ResearchPipelineDashboard />} />
+            <Route path="/blackmind"      element={<ScienceLabPanel />} />
+            <Route path="/blackmind/knowledge" element={<KnowledgeGraphViewer />} />
+            <Route path="/blackmind/analytics" element={<CrossDomainAnalyticsDashboard />} />
             <Route path="/settings"       element={<Settings />} />
             <Route path="/workflows"       element={<WorkflowDashboard />} />
             {/* Authenticated users CAN view a public COA page — no sidebar ambiguity */}

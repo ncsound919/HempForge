@@ -1,165 +1,133 @@
 /**
- * llmGate.ts
- * Tiered LLM routing middleware for HempForge.
+ * src/middleware/llmGate.ts
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Capability detector — NOT an LLM router. HempForge is fully deterministic.
  *
- * Every route that may call an LLM passes through this middleware first.
- * It probes API key validity and Ollama reachability, then attaches
- * `req.llmAvailable` so each route can select the correct execution tier
- * at call time — without hard-failing if a key is absent.
+ * This middleware probes (a) whether Ollama is reachable and (b) what
+ * capabilities the request is permitted to use, then attaches that
+ * information to `req.capabilities`. Routes inspect `req.capabilities` to
+ * decide whether to call the local model server or fall back to the
+ * deterministic rule engine.
  *
- * Tier resolution (lowest-cost tier wins):
- *   Tier 1/2 — deterministic engines (no LLM needed)        → always available
- *   Tier 3   — Ollama (local LLM)                           → if ollamaReachable
- *   Tier 4   — Gemini (cloud LLM)                           → if geminiKeyValid
+ * There is no Gemini path. There never was after the Gemini removal.
  *
- * The platform NEVER throws a 500 because a key is missing.
- * It returns a deterministic result and sets `usedTier` in the response.
- *
- * Note: isValidGeminiKey mirrors the validation in backendServices.ts
- * (AIzaSy prefix, length > 10, not the placeholder value).
+ * Output labels used by this middleware:
+ *   "deterministic"        — rule engine / math / regex
+ *   "heuristic"            — keyword routing with a confidence threshold
+ *   "local-model"          — Ollama inference (optional, additive)
+ *   "rejected"             — input did not pass validation; not parseable
  */
 
-import type { Request, Response, NextFunction } from 'express';
+import { RequestHandler } from "express";
+import { ollamaHealthCheck } from "../lib/ollamaInference";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface LLMAvailability {
-  gemini: boolean;
-  ollama: boolean;
-  /** Highest tier currently available (3=Ollama, 4=Gemini, 2=deterministic only) */
-  bestTier: 2 | 3 | 4;
+export interface Capabilities {
+  ollama: {
+    available: boolean;
+    endpoint: string;
+    model: string;
+  };
+  /** Best (most capable) tier available for the current request. */
+  bestTier: 1 | 3;
+  /** All available tiers, ordered from most deterministic to most capable. */
+  availableTiers: Array<1 | 3>;
 }
 
 declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
   namespace Express {
     interface Request {
-      llmAvailable: LLMAvailability;
+      capabilities?: Capabilities;
     }
   }
 }
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL ?? 'http://localhost:11434';
-const OLLAMA_HEALTH_TIMEOUT_MS = 1500;
-
-// ---------------------------------------------------------------------------
-// Probe functions
-// ---------------------------------------------------------------------------
-
+const cachedCapabilities: { value: Capabilities | null; expiresAt: number; lastProbedAt: number } = {
+  value: null,
+  expiresAt: 0,
+  lastProbedAt: 0,
+};
 /**
- * Validates that the Gemini API key looks structurally correct.
- * Mirrors the check in src/services/backendServices.ts isValidGeminiKey.
+ * Short cache TTL — 5 seconds. The Ollama probe is async and cheap; we
+ * re-check frequently so a user starting Ollama mid-session sees it within
+ * seconds. The full autonomous cron also calls `forceProbe()` periodically.
  */
-export function isValidGeminiKey(key: string | undefined): boolean {
-  if (!key) return false;
-  const cleaned = key.trim();
-  return cleaned.startsWith('AIzaSy') && cleaned.length > 10 && cleaned !== 'MY_GEMINI_API_KEY';
-}
+const CACHE_MS = 5_000;
 
-/** Hits the Ollama /api/tags endpoint with a short timeout. */
-export async function ollamaReachable(baseUrl: string = OLLAMA_BASE_URL): Promise<boolean> {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), OLLAMA_HEALTH_TIMEOUT_MS);
-    const res = await fetch(`${baseUrl}/api/tags`, { signal: controller.signal });
-    clearTimeout(timeout);
-    return res.ok;
-  } catch {
-    return false;
+async function detectCapabilities(forceFresh = false): Promise<Capabilities> {
+  const now = Date.now();
+  if (!forceFresh && cachedCapabilities.value && cachedCapabilities.expiresAt > now) {
+    return cachedCapabilities.value;
   }
-}
 
-// ---------------------------------------------------------------------------
-// Middleware
-// ---------------------------------------------------------------------------
-
-/**
- * Express middleware. Attach to any route that may invoke an LLM.
- *
- * Usage:
- *   router.post('/api/reports/generate', llmGate, reportHandler);
- *
- * In the handler:
- *   if (req.llmAvailable.bestTier >= 4) { // use Gemini }
- *   else if (req.llmAvailable.bestTier >= 3) { // use Ollama }
- *   else { // return deterministic result only }
- */
-export async function llmGate(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  const geminiKey = process.env.GEMINI_API_KEY;
-  const geminiValid = isValidGeminiKey(geminiKey);
-  const ollamaUp = await ollamaReachable();
-
-  let bestTier: 2 | 3 | 4;
-  if (geminiValid) bestTier = 4;
-  else if (ollamaUp) bestTier = 3;
-  else bestTier = 2;
-
-  req.llmAvailable = {
-    gemini: geminiValid,
-    ollama: ollamaUp,
-    bestTier,
+  const ollamaStatus = await ollamaHealthCheck();
+  cachedCapabilities.lastProbedAt = now;
+  const capabilities: Capabilities = {
+    ollama: {
+      available: ollamaStatus.available,
+      endpoint: ollamaStatus.endpoint,
+      model: ollamaStatus.model,
+    },
+    bestTier: ollamaStatus.available ? 3 : 1,
+    availableTiers: ollamaStatus.available ? [1, 3] : [1],
   };
-
-  next();
+  cachedCapabilities.value = capabilities;
+  cachedCapabilities.expiresAt = now + CACHE_MS;
+  return capabilities;
 }
 
-// ---------------------------------------------------------------------------
-// Route-level helper — use inside handlers after llmGate runs
-// ---------------------------------------------------------------------------
+/**
+ * Force a fresh probe. Called by the autonomy loop so the UI always shows
+ * the most current availability without waiting for cache expiry.
+ */
+export async function forceProbe(): Promise<Capabilities> {
+  return detectCapabilities(true);
+}
 
 /**
- * Returns the best available LLM caller, or null if only deterministic
- * tier is available. Allows routes to gracefully degrade inline:
- *
- *   const llm = selectLLM(req.llmAvailable);
- *   const narrative = llm ? await llm(prompt) : null;
+ * Middleware that attaches `req.capabilities` for downstream handlers.
  */
-export function selectLLM(
-  availability: LLMAvailability
+export const capabilityGate: RequestHandler = async (req, _res, next) => {
+  try {
+    req.capabilities = await detectCapabilities();
+  } catch {
+    req.capabilities = {
+      ollama: { available: false, endpoint: "", model: "" },
+      bestTier: 1,
+      availableTiers: [1],
+    };
+  }
+  next();
+};
+
+/**
+ * Returns the Ollama call function if available, otherwise null.
+ * Routes that use this must always have a deterministic fallback path.
+ */
+export function selectLocalModel(
+  capabilities: Capabilities | undefined,
+  preferLocal = true
 ): ((prompt: string) => Promise<string>) | null {
-  if (availability.bestTier === 4) {
-    return async (prompt: string) => {
-      const { generateGeminiResponse } = await import('../lib/geminiService');
-      return generateGeminiResponse(prompt);
-    };
-  }
-  if (availability.bestTier === 3) {
-    return async (prompt: string) => {
-      const { generateOllamaResponse } = await import('../lib/ollamaService');
-      return generateOllamaResponse(prompt);
-    };
-  }
+  if (!capabilities || !capabilities.ollama.available) return null;
+  if (!preferLocal) return null;
+  // The actual Ollama call is in ollamaInference. We return a thin wrapper.
+  // Routes that need text-generation should import `inferWithOllama` directly.
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Response helper — stamps tier provenance on every response
-// ---------------------------------------------------------------------------
-
 /**
- * Wraps a response body with tier metadata so callers always know
- * how the result was produced.
- *
- *   return res.json(withTierMeta(req.llmAvailable, { compliance, trends }));
+ * Decorates a response payload with provenance metadata describing how it was
+ * produced. Replaces the old `withTierMeta`.
  */
-export function withTierMeta<T extends object>(
-  availability: LLMAvailability,
-  body: T
-): T & { _meta: { usedTier: number; llmAvailable: LLMAvailability } } {
+export function withCapabilityMeta<T extends Record<string, unknown>>(
+  capabilities: Capabilities | undefined,
+  payload: T
+): T & { _provenance: { mode: string; tiers: Array<1 | 3> } } {
   return {
-    ...body,
-    _meta: {
-      usedTier: availability.bestTier,
-      llmAvailable: availability,
+    ...payload,
+    _provenance: {
+      mode: capabilities?.bestTier === 3 ? "deterministic+local-model" : "deterministic",
+      tiers: capabilities?.availableTiers ?? [1],
     },
   };
 }
