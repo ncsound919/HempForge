@@ -22,19 +22,42 @@ export default function SignIn() {
   const [authBusy, setAuthBusy] = useState(false);
   const showDevForm = isDevBypass || isDevelopment;
 
+  const friendlyGoogleError = (raw: string): string => {
+    if (/auth\/popup-closed-by-user/i.test(raw))
+      return 'Popup closed before sign-in completed. Try again and keep the popup open.';
+    if (/auth\/popup-blocked/i.test(raw))
+      return 'Browser blocked the sign-in popup. Allow popups for this site and retry.';
+    if (/auth\/unauthorized-domain/i.test(raw))
+      return 'This site is not authorized for Google sign-in (unauthorized-domain). The deployment URL must be added in Firebase console → Authentication → Authorized domains.';
+    if (/auth\/operation-not-allowed/i.test(raw))
+      return 'Google sign-in is not enabled in Firebase console → Authentication → Sign-in method.';
+    if (/auth\/invalid-api-key|auth\/app-not-authorized/i.test(raw))
+      return 'Firebase config rejected (invalid API key). The deployed config does not match this project.';
+    if (/auth\/network-request-failed/i.test(raw))
+      return 'Network error reaching Google. Check your connection and retry.';
+    if (/redirect.*not allowed|redirect_to|validation_failed/i.test(raw))
+      return 'Login redirect rejected. The site URL must be allowlisted (Supabase Auth → URL Configuration).';
+    return raw;
+  };
+
   const signInWithGoogle = () => {
+    setAuthError(null);
     if (IS_SUPABASE_AUTH) {
       supabaseAuth.signInWithGoogle().catch((err: any) => {
-        setAuthError(err?.message || String(err));
+        const msg = err?.message || String(err);
+        console.warn('Google sign-in failed:', msg);
+        setAuthError(friendlyGoogleError(msg));
       });
       return;
     }
     const provider = new GoogleAuthProvider();
     signInWithPopup(auth, provider).catch((err: any) => {
-      // Firebase Auth will reject the popup when only the local mock
-      // Firebase is wired up. Surface that as a clear message instead of
-      // leaving a silent error in the console.
-      console.warn('Google sign-in failed:', err?.message || err);
+      // Firebase Auth rejects the popup when only the local mock is wired
+      // up, when the domain is unauthorized, or when the provider is off.
+      // Surface that visibly — a silent console.warn left users stranded.
+      const msg = err?.message || String(err);
+      console.warn('Google sign-in failed:', msg);
+      setAuthError(friendlyGoogleError(msg));
     });
   };
 
@@ -99,6 +122,10 @@ export default function SignIn() {
       >
         Sign in with Google
       </button>
+
+      {authError && !IS_SUPABASE_AUTH && (
+        <div className="text-[11px] text-red-300 max-w-md text-center">{authError}</div>
+      )}
 
       {IS_SUPABASE_AUTH && (
         <form
