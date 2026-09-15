@@ -6,6 +6,8 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { AuditLog, writeToFirestore, fetchFromFirestore } from "../lib/firebaseService";
+import { appendChainedEntry, FirestoreChainStateStore, InMemoryChainStateStore, type ChainStateStore } from "../lib/auditEngine";
+import { DEFAULT_TENANT } from "../config";
 
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
@@ -159,11 +161,55 @@ export async function getAuditLogs(authToken: string): Promise<AuditLog[]> {
   }
 }
 
-export async function saveAuditLog(log: Omit<AuditLog, "hash">, authToken: string): Promise<void> {
+export async function saveAuditLog(log: Omit<AuditLog, "hash">, authToken: string): Promise<AuditLog | null> {
   try {
-    await writeToFirestore("auditLogs", log.id, log, authToken);
+    // ALCOA++ chained, keyed write: every audit write becomes a chained entry
+    // (sequenceNumber + previousHash, HMAC-keyed) so the ledger is tamper-
+    // evident and survives restarts via the chain-state store. Legacy entries
+    // that are already chained pass through unchanged.
+    const chained = await toChainedEntry(log);
+    if (!chained) {
+      console.error("saveAuditLog: chain append failed — entry not written");
+      return null;
+    }
+    await writeToFirestore("auditLogs", chained.id, chained, authToken);
+    return chained;
   } catch (err) {
     console.error("Error writing audit log:", err);
+    return null;
+  }
+}
+
+// Shared chain-state store: Firestore-backed in production, in-memory fallback
+// in local/dev so the chain still works without a Firestore emulator.
+const chainStore: ChainStateStore = adminDb
+  ? new FirestoreChainStateStore(adminDb, "chainState")
+  : new InMemoryChainStateStore();
+
+async function toChainedEntry(log: Omit<AuditLog, "hash">): Promise<AuditLog | null> {
+  // Already a chained entry? (e.g. re-write of a stored chain row) pass through.
+  if ((log as any).sequenceNumber && (log as any).previousHash) {
+    return log as AuditLog;
+  }
+  const entry = await appendChainedEntry(chainStore, {
+    userId: log.userId || "system",
+    userRole: log.userRole || "Operator",
+    tenantId: log.tenantId || DEFAULT_TENANT,
+    action: log.action || "SYSTEM_EVENT",
+    details: log.details || "",
+    category: normalizeAuditCategory(log.category),
+  });
+  return entry as unknown as AuditLog;
+}
+
+function normalizeAuditCategory(category: any): "DATA_CHANGE" | "AI_INFERENCE" | "SYSTEM_INTEGRATION" | "USER_ACTION" {
+  switch (category) {
+    case "DATA_CHANGE":
+    case "AI_INFERENCE":
+    case "SYSTEM_INTEGRATION":
+      return category;
+    default:
+      return "USER_ACTION";
   }
 }
 
@@ -286,6 +332,44 @@ function parseDevToken(token: string): { uid: string; email: string; tenantId: s
   return { uid, email, tenantId, role };
 }
 
+// ─── Ecosystem shared identity (Overlay365 IdP, auth-only) ───────────────────
+// The ecosystem Supabase project is the single Google/identity provider.
+// Tokens are verified with the browser-safe anon key directly against
+// `<ECOSYSTEM_SUPABASE_URL>/auth/v1/user` (8s timeout) — no service-role
+// secret. Unset → these helpers are inert and legacy auth is unchanged.
+export function isEcosystemAuthConfigured(): boolean {
+  return !!(process.env.ECOSYSTEM_SUPABASE_URL && process.env.ECOSYSTEM_SUPABASE_ANON_KEY);
+}
+
+export async function getEcosystemUser(
+  accessToken: string
+): Promise<{ id: string; email: string | null; appMetadata: Record<string, any>; userMetadata: Record<string, any> } | null> {
+  if (!isEcosystemAuthConfigured() || !accessToken) return null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const r = await fetch(`${process.env.ECOSYSTEM_SUPABASE_URL}/auth/v1/user`, {
+      headers: {
+        apikey: process.env.ECOSYSTEM_SUPABASE_ANON_KEY as string,
+        Authorization: `Bearer ${accessToken}`,
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!r.ok) return null;
+    const user = (await r.json()) as any;
+    if (!user || typeof user.id !== "string") return null;
+    return {
+      id: user.id,
+      email: user.email ?? null,
+      appMetadata: (user.app_metadata || {}) as Record<string, any>,
+      userMetadata: (user.user_metadata || {}) as Record<string, any>,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export const authMiddleware = async (req: any, res: any, next: any) => {
   const authHeader = req.headers.authorization;
   const bearerToken =
@@ -316,6 +400,35 @@ export const authMiddleware = async (req: any, res: any, next: any) => {
     return next();
   }
 
+  // Shared ecosystem identity (Overlay365 IdP) — authoritative when configured.
+  if (isEcosystemAuthConfigured()) {
+    const eco = await getEcosystemUser(bearerToken);
+    if (eco) {
+      const meta = eco.appMetadata;
+      const userMeta = eco.userMetadata;
+      const tenantId =
+        typeof meta.tenant_id === "string" && meta.tenant_id.trim()
+          ? meta.tenant_id
+          : typeof userMeta.tenant_id === "string" && userMeta.tenant_id.trim()
+            ? userMeta.tenant_id
+            : "Global-Hemp-Wilson";
+      const role =
+        typeof meta.role === "string" && meta.role.trim()
+          ? meta.role
+          : typeof userMeta.role === "string" && userMeta.role.trim()
+            ? userMeta.role
+            : "Operator";
+      req.authContext = {
+        userId: eco.id,
+        userEmail: eco.email || "unknown@domain.com",
+        userRole: role,
+        tenantId,
+      };
+      req.decodedClaims = { uid: eco.id, email: eco.email, tenantId, role };
+      return next();
+    }
+  }
+
   // Supabase-backed auth (production): validate the JWT against the Supabase
   // project using the service role, then derive tenantId/role from the token's
   // app_metadata. Supabase auth tokens are JWTs signed by the project — the
@@ -338,7 +451,7 @@ export const authMiddleware = async (req: any, res: any, next: any) => {
         const role =
           typeof meta.role === "string" && meta.role.trim()
             ? meta.role
-            : "Lab Admin";
+            : "Operator";
         req.authContext = {
           userId: data.user.id,
           userEmail: data.user.email || "unknown@domain.com",

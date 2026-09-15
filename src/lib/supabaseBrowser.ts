@@ -15,12 +15,31 @@
  */
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-const url = (import.meta.env?.VITE_SUPABASE_URL as string) || '';
-const anonKey = (import.meta.env?.VITE_SUPABASE_ANON_KEY as string) || '';
+// Shared ecosystem identity (Overlay365 IdP, auth-only). When its browser-safe
+// anon key is present the auth client targets the shared project; otherwise it
+// falls back to the legacy app project (VITE_SUPABASE_URL/ANON_KEY), so
+// behavior is unchanged until the ecosystem vars are provisioned.
+const ecosystemUrl =
+  (import.meta.env?.VITE_ECOSYSTEM_SUPABASE_URL as string) ||
+  'https://hjjgsbejhkwiyghncobe.supabase.co';
+const ecosystemAnonKey = (import.meta.env?.VITE_ECOSYSTEM_SUPABASE_ANON_KEY as string) || '';
+
+export const IS_ECOSYSTEM_AUTH = ecosystemAnonKey.length > 40;
+
+const url = IS_ECOSYSTEM_AUTH
+  ? ecosystemUrl
+  : (import.meta.env?.VITE_SUPABASE_URL as string) || '';
+const anonKey = IS_ECOSYSTEM_AUTH
+  ? ecosystemAnonKey
+  : (import.meta.env?.VITE_SUPABASE_ANON_KEY as string) || '';
 const authMode = (import.meta.env?.VITE_AUTH_MODE as string) || '';
 
 export const IS_SUPABASE_AUTH =
-  authMode === 'supabase' && url.includes('.supabase.co') && anonKey.length > 40;
+  (IS_ECOSYSTEM_AUTH || authMode === 'supabase') &&
+  url.includes('.supabase.co') &&
+  anonKey.length > 40;
+
+export const SUPABASE_AUTH_PROJECT = url;
 
 type Listener = (user: SupabaseMockUser | null) => void;
 
