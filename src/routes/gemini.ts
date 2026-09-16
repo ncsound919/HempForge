@@ -98,12 +98,16 @@ export function planHarnessDecision(input: string): PlannerDecision {
   // still contains the planner's own "Planning next action" line, so key off the
   // observation text the harness injects into latestObjective, not the trace.
   if (/Latest observation from/i.test(input)) {
-    return {
-      action: "respond",
-      agentType: "Reporting",
-      message: "Deterministic run complete — the computed result is shown in the observation above.",
-      confidence: 0.9,
-    };
+    const total = input.match(/"calculatedTotal"\s*:\s*([\d.]+)/)?.[1];
+    const status = input.match(/"status"\s*:\s*"([^"]+)"/)?.[1];
+    const papers = input.match(/"papers"\s*:\s*\[/)?.[0];
+    let message = "Deterministic run complete — the computed result is shown in the observation above.";
+    if (total !== undefined) {
+      message = `Total THC (dry weight): ${total}% — status: ${status ?? "n/a"}. Formula: (THCa × 0.877) + Δ9-THC.`;
+    } else if (papers) {
+      message = "Literature search complete — results are shown in the observation above.";
+    }
+    return { action: "respond", agentType: "Reporting", message, confidence: 0.9 };
   }
 
   const num = (re: RegExp): number | undefined => {

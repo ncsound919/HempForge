@@ -111,28 +111,31 @@ function safeJsonParse<T>(raw: string): T | null {
 }
 
 function summarizeObservation(toolName: string, result: any): string {
+  // API responses are wrapped in a ProvenanceEnvelope ({ data, provenance, ... }).
+  const d = result && typeof result === 'object' && 'data' in result ? result.data : result;
+
   if (toolName === 'calculate_total_thc') {
-    return `Calculated total THC: ${result?.calculatedTotal ?? 'unknown'}, status: ${result?.status ?? 'unknown'}, alerts: ${(result?.alerts || []).join('; ') || 'none'}`;
+    return `Calculated total THC: ${d?.calculatedTotal ?? 'unknown'}%, status: ${d?.status ?? 'unknown'}, alerts: ${(d?.alerts || []).join('; ') || 'none'}`;
   }
 
   if (toolName === 'search_literature') {
-    const count = result?.count ?? result?.papers?.length ?? 0;
+    const count = d?.count ?? d?.papers?.length ?? 0;
     return `Literature search returned ${count} papers.`;
   }
 
   if (toolName === 'get_cached_literature') {
-    const count = result?.papers?.length ?? 0;
+    const count = d?.papers?.length ?? 0;
     return `Cached literature contains ${count} papers.`;
   }
 
   if (toolName === 'get_coas') {
-    const count = Array.isArray(result) ? result.length : 0;
+    const count = Array.isArray(d) ? d.length : (d?.coas?.length ?? 0);
     return `Retrieved ${count} COA records.`;
   }
 
-  return typeof result === 'string'
-    ? result
-    : JSON.stringify(result).slice(0, 500);
+  return typeof d === 'string'
+    ? d
+    : JSON.stringify(d).slice(0, 500);
 }
 
 function buildRecentContext(history: HarnessMessage[], limit = 8) {
