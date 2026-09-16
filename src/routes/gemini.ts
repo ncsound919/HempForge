@@ -75,6 +75,84 @@ function buildKeywordResponse(message: string): { text: string; agentType: strin
   };
 }
 
+interface PlannerDecision {
+  action: "respond" | "tool_call" | "ask_clarifying_question";
+  agentType: string;
+  message: string;
+  toolName?: string;
+  args?: Record<string, unknown>;
+  confidence: number;
+}
+
+/**
+ * Deterministic planner for the Swarm Orchestrator harness. Given the harness
+ * planner input (objective + tool list + trace), pick the next action. Emits the
+ * same JSON shape the harness expects from a model, so the loop runs LLM-free:
+ *   step 1  -> choose a tool based on the objective keywords
+ *   step 2+ -> finalize (a tool already produced an observation)
+ */
+export function planHarnessDecision(input: string): PlannerDecision {
+  const objective = (input.match(/User objective:\s*([\s\S]*?)(?:\n\s*\n|Recent conversation)/i)?.[1] || input).toLowerCase();
+
+  // A tool has already run -> produce the final answer.
+  if (/Latest observation from/i.test(input) || /Trace so far:(?!\s*none)/i.test(input)) {
+    return {
+      action: "respond",
+      agentType: "Reporting",
+      message: "Deterministic run complete — the computed result is shown in the observation above.",
+      confidence: 0.9,
+    };
+  }
+
+  const num = (re: RegExp): number | undefined => {
+    const m = input.match(re);
+    return m ? Number(m[1]) : undefined;
+  };
+
+  if (/thc|potency|decarb|calculat|complian|percent/.test(objective)) {
+    const thca = num(/thca[^\d]{0,12}([\d.]+)/i);
+    const d9 =
+      num(/d9\s*-?\s*thc[^\d]{0,12}([\d.]+)/i) ??
+      num(/delta\s*[- ]?9[^\d]{0,12}([\d.]+)/i);
+    if (thca === undefined && d9 === undefined) {
+      return {
+        action: "ask_clarifying_question",
+        agentType: "Compliance",
+        message: "Provide the THCa and Delta-9 THC percentages (dry weight) so I can compute total THC.",
+        confidence: 0.7,
+      };
+    }
+    return {
+      action: "tool_call",
+      agentType: "Compliance",
+      message: "Computing dry-weight total THC.",
+      toolName: "calculate_total_thc",
+      args: { thca: thca ?? 0, d9thc: d9 ?? 0 },
+      confidence: 0.95,
+    };
+  }
+
+  if (/cached|summar/.test(objective)) {
+    return { action: "tool_call", agentType: "Literature", message: "Reading cached literature signals.", toolName: "get_cached_literature", args: {}, confidence: 0.9 };
+  }
+
+  if (/literature|search|pubmed|study|studies|curing|stability|paper|research/.test(objective)) {
+    const query = objective.replace(/\s+/g, " ").trim().slice(0, 120) || "hemp compliance";
+    return { action: "tool_call", agentType: "Literature", message: "Searching the literature.", toolName: "search_literature", args: { query }, confidence: 0.9 };
+  }
+
+  if (/coa|audit|batch|batches|review/.test(objective)) {
+    return { action: "tool_call", agentType: "Compliance", message: "Retrieving COA records.", toolName: "get_coas", args: {}, confidence: 0.9 };
+  }
+
+  return {
+    action: "respond",
+    agentType: "Orchestrator",
+    message: "I can compute total THC, audit COAs, search literature, or summarize cached literature. Which would you like?",
+    confidence: 0.6,
+  };
+}
+
 export function geminiRouter(deps: { authMiddleware: RequestHandler }): Router {
   const router = Router();
 
@@ -83,7 +161,25 @@ export function geminiRouter(deps: { authMiddleware: RequestHandler }): Router {
     const message = req.body?.message;
     if (!message) return res.status(400).json({ error: "Message is required" });
 
-    const { text, agentType } = buildKeywordResponse(message);
+    // The Swarm Orchestrator harness sends its system prompt + planner input and
+    // expects a JSON planner decision back. Produce one deterministically so the
+    // harness works with no LLM (it is the "model" in the deterministic era).
+    const isHarnessPlanner = /Decide the next best action/i.test(message);
+    let text: string;
+    let agentType: string;
+    let method: string;
+
+    if (isHarnessPlanner) {
+      const decision = planHarnessDecision(message);
+      text = JSON.stringify(decision);
+      agentType = decision.agentType;
+      method = "deterministic-planner";
+    } else {
+      const r = buildKeywordResponse(message);
+      text = r.text;
+      agentType = r.agentType;
+      method = "keyword-signal-scoring";
+    }
 
     const auditEntry: Omit<AuditLog, "hash"> = {
       id: `log-${Date.now()}`,
@@ -102,7 +198,7 @@ export function geminiRouter(deps: { authMiddleware: RequestHandler }): Router {
       agentType,
       simulated: true,
       provenance: {
-        method: "keyword-signal-scoring",
+        method,
         model: "rule-engine",
       },
     });
