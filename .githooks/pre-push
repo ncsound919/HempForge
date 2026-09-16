@@ -1,0 +1,36 @@
+#!/bin/sh
+# ─────────────────────────────────────────────────────────────────────────────
+# Ecosystem deploy gate. Git runs this on every push; a non-zero exit BLOCKS the
+# push. Unlike a written rule, it cannot be ignored or "forgotten".
+#
+#   1. the repo must BUILD (catches e.g. a Next config/dependency break)
+#   2. every public site must pass the live verification (catches 404/500/
+#      unmounted routes deployed to prod)
+#
+# Bypass (for a genuine emergency only):  git push --no-verify
+# ─────────────────────────────────────────────────────────────────────────────
+REPO="$(git rev-parse --show-toplevel)"
+KEYWIRE="${KEYWIRE_DIR:-C:/Users/User/Downloads/Uplift/Keywire}"
+LOG="$(mktemp 2>/dev/null || echo /tmp/gate-$$.log)"
+
+if [ -f "$REPO/package.json" ]; then
+  echo "[gate] build: $REPO"
+  if ! (cd "$REPO" && npm run build --if-present) >"$LOG" 2>&1; then
+    echo "[gate] BUILD FAILED — push blocked:"
+    tail -30 "$LOG"
+    exit 1
+  fi
+  echo "[gate] build OK"
+fi
+
+if [ -f "$KEYWIRE/scripts/verify-sites.mjs" ]; then
+  echo "[gate] live site verification"
+  if ! node "$KEYWIRE/scripts/verify-sites.mjs" >"$LOG" 2>&1; then
+    echo "[gate] SITES FAILING — push blocked:"
+    tail -45 "$LOG"
+    exit 1
+  fi
+  echo "[gate] sites OK"
+fi
+
+echo "[gate] PASS"
