@@ -29,6 +29,13 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
     {
+      // Validation against EXTERNAL standards (statute, published kinetics),
+      // not against the implementation itself.
+      name: "validation",
+      testMatch: "**/validation/**/*.spec.ts",
+      use: { ...devices["Desktop Chrome"] },
+    },
+    {
       name: "e2e-chromium",
       testMatch: "**/e2e/**/*.spec.ts",
       use: { ...devices["Desktop Chrome"] },

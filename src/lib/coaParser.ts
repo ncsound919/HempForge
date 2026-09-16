@@ -1,3 +1,5 @@
+import { DECARB_CONVERSION_FACTOR } from "./complianceEngine";
+
 export interface ExtractionResult {
   extracted: boolean;
   value: any;
@@ -24,7 +26,13 @@ export function extractThca(text: string): ExtractionResult {
 export function extractD9Thc(text: string): ExtractionResult {
   let m = text.match(/\b(?:Delta-9|D9|Δ9|delta9|d9-thc|delta-9-thc)\s*[-\s]?(?:THC)?\s*[:\-]?\s*([0-9]+\.?[0-9]*)\s*%?/i);
   if (!m) {
-    m = text.match(/\bthc\s*[:\-]\s*([0-9]+\.?[0-9]*)/i);
+    // A bare "THC" row counts as delta-9 THC only when it is NOT the summed
+    // value. "Total THC: 0.32" is delta-9 + 0.877*THCa — reading it as delta-9
+    // corrupts the statutory sum (it would be counted twice, pre- and
+    // post-decarboxylation). See tests/validation/external-standards.spec.ts.
+    m = text.match(
+      /(?<!\b(?:total|sum|combined|calculated|final)\s*)\bthc\s*[:\-]\s*([0-9]+\.?[0-9]*)\s*%?/i,
+    );
   }
   if (m) {
     const val = parseFloat(m[1]);
@@ -58,7 +66,8 @@ export function parseCOAWithRegex(text: string, fallbackBatchId: string) {
 
   const thca = thcaRes.extracted ? thcaRes.value : 0;
   const d9thc = d9thcRes.extracted ? d9thcRes.value : 0;
-  const totalThc = parseFloat(((thca * 0.877) + d9thc).toFixed(3));
+  // Unrounded — the status below must reflect the true value, not a 3 dp one.
+  const totalThc = (thca * DECARB_CONVERSION_FACTOR) + d9thc;
   
   let status: 'Compliant' | 'At Risk' | 'Non-Compliant' = 'Compliant';
   if (totalThc > 0.3) status = 'Non-Compliant';

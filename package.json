@@ -10,6 +10,7 @@
     "lint": "tsc --noEmit",
     "test": "vitest run run-tests.test.ts",
     "test:unit": "npx playwright test --project=unit",
+    "test:validation": "npx playwright test --project=validation",
     "test:api": "npx playwright test --project=api",
     "test:e2e": "npx playwright test --project=e2e-chromium",
     "test:all": "npx playwright test",
