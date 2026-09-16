@@ -94,8 +94,10 @@ interface PlannerDecision {
 export function planHarnessDecision(input: string): PlannerDecision {
   const objective = (input.match(/User objective:\s*([\s\S]*?)(?:\n\s*\n|Recent conversation)/i)?.[1] || input).toLowerCase();
 
-  // A tool has already run -> produce the final answer.
-  if (/Latest observation from/i.test(input) || /Trace so far:(?!\s*none)/i.test(input)) {
+  // A tool has already run -> produce the final answer. On step 1 the trace
+  // still contains the planner's own "Planning next action" line, so key off the
+  // observation text the harness injects into latestObjective, not the trace.
+  if (/Latest observation from/i.test(input)) {
     return {
       action: "respond",
       agentType: "Reporting",
