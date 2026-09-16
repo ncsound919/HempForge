@@ -70,6 +70,9 @@ class SupabaseAuthAdapter {
   private sb: SupabaseClient | null = null;
   private user: SupabaseMockUser | null = null;
   private listeners = new Set<Listener>();
+  // Set once the initial persisted-session check has resolved, so subscribers
+  // that attach afterwards still get the current (possibly null) state.
+  private initialized = false;
 
   constructor() {
     if (!IS_SUPABASE_AUTH) return;
@@ -79,6 +82,7 @@ class SupabaseAuthAdapter {
     // Restore a persisted session on boot.
     this.sb.auth.getSession().then(({ data }) => {
       const session = data.session;
+      this.initialized = true;
       if (session?.user) {
         this.setUser(session);
       } else {
@@ -141,7 +145,10 @@ class SupabaseAuthAdapter {
 
   onAuthStateChanged(cb: Listener) {
     this.listeners.add(cb);
-    if (this.user) cb(this.user);
+    // Always report the CURRENT state once the initial session check has run,
+    // including null (signed out). Reporting only truthy users left consumers
+    // (UserProvider) stuck on "Initializing Workspace..." forever.
+    if (this.initialized) cb(this.user);
     return () => this.listeners.delete(cb);
   }
 
