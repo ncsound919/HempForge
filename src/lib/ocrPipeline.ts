@@ -1,7 +1,14 @@
 import { createRequire } from "module";
 
 const require = createRequire(import.meta.url);
-const pdfParse = require("pdf-parse");
+// Lazy-load pdf-parse: v2 pulls a native canvas dep at require() time
+// (DOMMatrix polyfill) that is absent in serverless. Keeping it off the
+// module-load path means unrelated API routes never need the native binary.
+async function pdfParse(buffer: any): Promise<any> {
+  const mod: any = await import("pdf-parse");
+  const fn = typeof mod === "function" ? mod : mod.default;
+  return fn(buffer);
+}
 
 export interface OcrResult {
   text: string;
