@@ -7,7 +7,7 @@
   "functions": {
     "api/[...path].ts": {
       "maxDuration": 300,
-      "includeFiles": "**/*.traineddata*,**/*.wasm"
+      "includeFiles": "dist/server.mjs,**/*.traineddata*,**/*.wasm"
     },
     "api/billing/webhook.ts": {
       "maxDuration": 60

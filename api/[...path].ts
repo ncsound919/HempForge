@@ -1,12 +1,14 @@
 // Vercel catch-all API function: mounts the full Express app so every route
 // works in production (billing, COA intake, audit, literature, autonomy, etc).
 //
-// The request URL passed to a Vercel function is the original path (e.g.
-// /api/billing/webhook), which matches the routes the SPA calls. Background
-// cron jobs are skipped on Vercel (see server.ts IS_VERCEL gate) — long-lived
-// schedulers stay on Docker; Vercel Cron can drive /api/* if needed.
+// Imports the PRE-BUILT esbuild bundle (dist/server.mjs) rather than the raw
+// server.ts. Vercel transpiles an out-of-api/ TS import to a bare `server.js`
+// but does NOT bundle its transitive graph, so Node ESM then cannot resolve the
+// relative specifiers (ERR_MODULE_NOT_FOUND on ./src/services/...). The bundle
+// is self-contained (only bare node_modules specifiers remain), which the
+// runtime resolves from node_modules.
 import type { IncomingMessage, ServerResponse } from "http";
-import { buildApp } from "../server.js";
+import { buildApp } from "../dist/server.mjs";
 
 let cachedApp: any = null;
 
