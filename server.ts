@@ -41,6 +41,7 @@ import { agentBrowsingRouter } from "./src/routes/agentBrowsing";
 import { blackmindRouter } from "./src/routes/blackmind";
 import { researchclawRouter } from "./src/routes/researchclaw";
 import { geminiRouter } from "./src/routes/gemini";
+import { researchLabRouter } from "./src/routes/researchLab";
 
 const PORT = Number(process.env.PORT || 3000);
 
@@ -103,6 +104,8 @@ export async function buildApp() {
   app.use("/api/researchclaw", researchclawRouter());
   // Deprecated-but-preserved deterministic adapter the Swarm harness calls.
   app.use("/api/gemini", geminiRouter({ authMiddleware }));
+  // Research Lab: /api/ocr/extract + /api/scene/generate.
+  app.use("/api", researchLabRouter({ authMiddleware }));
 
   // Security policy endpoint reuses the health router
   app.use("/api/security", (req, res, next) => {
