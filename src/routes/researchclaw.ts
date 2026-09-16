@@ -4,7 +4,7 @@ import {
   createPipeline, getPipelineStatus, getPipelineResults,
   sendMessage, listProjects, listRuns, getRunDetail,
   stopPipeline, getPipelineStages, healthCheck,
-} from "../lib/researchClawClient.ts";
+} from "../lib/researchClawClient";
 import { HttpError } from "../middleware/errorHandler";
 
 export function researchclawRouter(authMiddleware?: RequestHandler): Router {

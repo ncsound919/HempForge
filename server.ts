@@ -5,7 +5,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import cors from "cors";
 
-import { authMiddleware } from "./src/services/backendServices.ts";
+import { authMiddleware } from "./src/services/backendServices";
 import { requestLogger } from "./src/middleware/requestLogger";
 import { errorHandler, notFoundHandler } from "./src/middleware/errorHandler";
 import { startLiteratureJobs } from "./src/jobs/literatureJobs";
@@ -14,6 +14,7 @@ import { registerAutonomousJobs } from "./src/jobs/autonomousJobs";
 import { registerAutonomyLoop } from "./src/agents/autonomyLoop";
 import { DEFAULT_TENANT } from "./src/config";
 import { configureMem0 } from "./src/lib/mem0Client";
+import { loadKeywireSecrets } from "./src/lib/keywireClient";
 
 import { healthRouter } from "./src/routes/health";
 import { authRouter } from "./src/routes/auth";
@@ -171,6 +172,11 @@ function startBackgroundJobs() {
 
 // ─── Server bootstrap (Docker / local) ───────────────────────────────────────
 async function startServer() {
+  // Pull secrets from the Keywire vault FIRST so module-level reads of
+  // STRIPE_*/COA_* env vars see the vault values. Honest degrade: when
+  // Keywire is unconfigured/unreachable, .env values are used.
+  await loadKeywireSecrets();
+
   const app = await buildApp();
   if (RUN_BACKGROUND_JOBS) startBackgroundJobs();
   app.listen(PORT, "0.0.0.0", () => {
