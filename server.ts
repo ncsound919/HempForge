@@ -2,7 +2,6 @@ import "dotenv/config";
 import express from "express";
 import "express-async-errors";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import cors from "cors";
 
 import { authMiddleware } from "./src/services/backendServices";
@@ -121,6 +120,9 @@ export async function buildApp() {
   // - development (default): Vite dev middleware with HMR.
   const useStatic = process.env.NODE_ENV === "production" || process.env.SERVE_STATIC === "true";
   if (process.env.NODE_ENV !== "production" && !process.env.SERVE_STATIC && !IS_VERCEL) {
+    // Lazy import: vite pulls rollup's platform-native binary, which must never
+    // load in production/serverless (its optional dep is absent on Vercel).
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
